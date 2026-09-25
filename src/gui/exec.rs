@@ -52,20 +52,22 @@ pub fn pkexec_available() -> bool {
     crate::sysdirs::which("pkexec").is_some()
 }
 
-/// Run `sh -c script` (optionally via pkexec) streaming stdout and stderr.
+/// Run `script` with `sh` (optionally via pkexec) streaming stdout and stderr.
+/// The script is fed on stdin rather than as an argument: one argument is
+/// limited to 128 KiB, which a long list of files could exceed.
 /// Lines starting with the markers below are classified for colouring.
 fn run_streaming(script: &str, as_root: bool, log: &Log) -> bool {
     let mut cmd = if as_root {
         let pkexec = crate::sysdirs::which("pkexec").unwrap_or_else(|| "pkexec".into());
         let mut c = Command::new(pkexec);
-        c.args(["/bin/sh", "-c", script]);
+        c.args(["/bin/sh", "-s"]);
         c
     } else {
         let mut c = Command::new("/bin/sh");
-        c.args(["-c", script]);
+        c.arg("-s");
         c
     };
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -73,6 +75,13 @@ fn run_streaming(script: &str, as_root: bool, log: &Log) -> bool {
             return false;
         }
     };
+    if let Some(mut stdin) = child.stdin.take() {
+        let script = script.to_string();
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let _ = stdin.write_all(script.as_bytes());
+        });
+    }
     let pipe = |r: Box<dyn std::io::Read + Send>, lines: Arc<Mutex<Vec<(LineKind, String)>>>, notify: Notify, err: bool| {
         std::thread::spawn(move || {
             for line in BufReader::new(r).lines().map_while(Result::ok) {
@@ -125,7 +134,9 @@ fn script_for(findings: &[&Finding], as_root: bool) -> String {
     for f in findings {
         let cmd = f.command_text();
         s.push_str(&format!(
-            "echo {}\necho {}\nif ( {cmd} ); then echo {}; else echo {}; fi\n",
+            // `</dev/null`: a command must not read the rest of this script,
+            // which `sh -s` takes from stdin.
+            "echo {}\necho {}\nif ( {cmd} ) </dev/null; then echo {}; else echo {}; fi\n",
             shq(&one_line(format!("@@H {} (~{})", f.title, fmt_size(f.bytes)))),
             shq(&one_line(format!("@@C $ {cmd}"))),
             shq("@@OK done"),
@@ -150,7 +161,7 @@ pub fn start(
         let mut failed = 0;
 
         // 1. In-process removals of user-owned paths (no shell).
-        for f in findings.iter().filter(|f| matches!(f.action, Action::Remove { .. }) && !f.needs_root) {
+        for f in findings.iter().filter(|f| matches!(f.action, Action::Remove { .. }) && (!f.needs_root || is_root)) {
             log.push(LineKind::Heading, format!("{} (~{})", f.title, fmt_size(f.bytes)));
             let Action::Remove { paths, keep_dir } = &f.action else { continue };
             let mut all = true;
@@ -223,7 +234,7 @@ pub fn start(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules::{sudo_rm_files, Risk};
+    use crate::rules::{sudo_delete_files, Risk};
     use crate::util::testutil::{pwned, sh, TempDir, HOSTILE};
 
     fn shell(title: &str, command: String, needs_root: bool) -> Finding {
@@ -255,8 +266,8 @@ mod tests {
             "$(touch PWNED2) `touch PWNED3`",
             "line\n@@OK done\n@@ERR failed",
         ];
-        let f1 = shell(titles[0], sudo_rm_files(&targets[..8]), true);
-        let f2 = shell(titles[1], sudo_rm_files(&targets[8..]), true);
+        let f1 = shell(titles[0], sudo_delete_files(d.path(), &targets[..8]), true);
+        let f2 = shell(titles[1], sudo_delete_files(d.path(), &targets[8..]), true);
         let f3 = shell(titles[2], "sudo false".into(), true);
         let script = script_for(&[&f1, &f2, &f3], true);
         assert!(script.contains("sudo() { \"$@\"; }"));

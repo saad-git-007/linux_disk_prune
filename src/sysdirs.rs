@@ -84,7 +84,9 @@ impl SysDirs {
         // journald stores logs persistently if /var/log/journal exists,
         // otherwise in the volatile /run/log/journal.
         let journals = ["/var/log/journal", "/run/log/journal"].iter().map(PathBuf::from).filter(|p| p.is_dir()).collect();
-        let crash = std::env::var_os("APPORT_REPORT_DIR").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| "/var/crash".into());
+        // Always apport's standard location: an APPORT_REPORT_DIR pointing at
+        // e.g. ~/Documents must never turn into "crash reports to delete".
+        let crash = PathBuf::from("/var/crash");
         let mut flatpak_system = run("flatpak", &["--installations"]).map(|o| parse_flatpak_installations(&o)).unwrap_or_default();
         if flatpak_system.is_empty() && Path::new("/var/lib/flatpak").is_dir() {
             flatpak_system.push("/var/lib/flatpak".into());

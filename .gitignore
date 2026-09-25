@@ -4,3 +4,5 @@
 /tests/blackbox/results.json
 /tests/blackbox/*.log
 __pycache__/
+/tests/safety/user/results.json
+/tests/functional/results.json

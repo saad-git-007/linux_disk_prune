@@ -118,10 +118,14 @@ fn main() -> Result<()> {
     };
     let root = std::fs::canonicalize(&args.path)
         .with_context(|| format!("cannot access {}", args.path.display()))?;
+    if !root.is_dir() {
+        anyhow::bail!("{} is not a directory: give a folder to scan", root.display());
+    }
     let scan_opts = ScanOptions {
         one_file_system: !args.cross_filesystems,
         min_file_size: args.min_file_size,
-        threads: if args.threads == 0 { scanner::auto_threads(&root) } else { args.threads },
+        // More threads than this only add overhead (and can exhaust memory).
+        threads: if args.threads == 0 { scanner::auto_threads(&root) } else { args.threads.min(4 * std::thread::available_parallelism().map_or(8, |n| n.get())) },
     };
     ui::set_truecolor(match args.color.as_str() {
         "truecolor" => true,
@@ -129,7 +133,7 @@ fn main() -> Result<()> {
         _ => ui::detect_truecolor(),
     });
 
-    if args.summary || args.json {
+    if args.summary || args.json || args.rules_only {
         return summary(&args, root, &scan_opts, &rule_ctx);
     }
     if !args.tui && gui::display_available() {
@@ -159,6 +163,13 @@ fn summary(args: &Args, root: PathBuf, opts: &ScanOptions, ctx: &RuleContext) ->
     );
     report.merge(sys);
     report.merge(art);
+    if let Some(t) = tree.as_ref().filter(|t| t.errors > 0) {
+        report.notes.push(format!(
+            "{} folder(s) under {} could not be read (permission denied, or paths too deep): sizes are a lower bound. Run with sudo for complete figures.",
+            fmt_count(t.errors),
+            root.display()
+        ));
+    }
 
     if args.json {
         let largest: Vec<_> = tree
@@ -176,6 +187,8 @@ fn summary(args: &Args, root: PathBuf, opts: &ScanOptions, ctx: &RuleContext) ->
         let json = serde_json::json!({
             "root": root.to_string_lossy(),
             "total_bytes": tree.as_ref().map(|t| t.root().size),
+            // Folders that could not be read: totals are then a lower bound.
+            "scan_errors": tree.as_ref().map(|t| t.errors),
             "largest_dirs": largest,
             "reclaimable": {
                 "safe": report.total(Risk::Safe),
@@ -197,17 +210,24 @@ fn summary(args: &Args, root: PathBuf, opts: &ScanOptions, ctx: &RuleContext) ->
         return Ok(());
     }
 
+    use std::fmt::Write as _;
+    use std::io::IsTerminal;
+    let mut o = String::new();
+    // Writing to a String cannot fail.
+    macro_rules! out {
+        ($($t:tt)*) => {{ let _ = writeln!(o, $($t)*); }};
+    }
     let bold = |s: &str| format!("\x1b[1m{s}\x1b[0m");
     let tier_color = |r: Risk| match r {
         Risk::Safe => "\x1b[1;32m",
         Risk::Moderate => "\x1b[1;33m",
         Risk::Caution => "\x1b[1;31m",
     };
-    println!("{}", bold(&format!("linux_disk_prune {} — Ubuntu disk report", env!("CARGO_PKG_VERSION"))));
-    println!("\x1b[2m{CREDITS}\x1b[0m\n");
+    out!("{}", bold(&format!("linux_disk_prune {} — Ubuntu disk report", env!("CARGO_PKG_VERSION"))));
+    out!("\x1b[2m{CREDITS}\x1b[0m\n");
 
     if let Some(t) = &tree {
-        println!(
+        out!(
             "Scanned {}: {} in {} files, {} dirs ({:.1}s{})",
             root.display(),
             bold(&fmt_size(t.root().size)),
@@ -216,13 +236,13 @@ fn summary(args: &Args, root: PathBuf, opts: &ScanOptions, ctx: &RuleContext) ->
             t.elapsed.as_secs_f64(),
             if t.errors > 0 { format!(", {} unreadable", fmt_count(t.errors)) } else { String::new() }
         );
-        println!("\n{}", bold("LARGEST DIRECTORIES"));
+        out!("\n{}", bold("LARGEST DIRECTORIES"));
         let total = t.root().size.max(1);
         for i in largest_dirs(t, args.top, args.depth) {
             let n = &t.nodes[i];
             let pct = n.size as f64 * 100.0 / total as f64;
             let bar = "█".repeat((pct / 5.0).round() as usize);
-            println!(
+            out!(
                 "  {:>11}  {:>5.1}%  \x1b[36m{:<20}\x1b[0m {}",
                 fmt_size(n.size),
                 pct,
@@ -232,32 +252,35 @@ fn summary(args: &Args, root: PathBuf, opts: &ScanOptions, ctx: &RuleContext) ->
         }
     }
 
-    println!("\n{}", bold("RECLAIMABLE SPACE"));
+    out!("\n{}", bold("RECLAIMABLE SPACE"));
     for r in Risk::ALL {
-        println!("  {}{:<9}\x1b[0m {:>11}", tier_color(r), r.label(), fmt_size(report.total(r)));
+        out!("  {}{:<9}\x1b[0m {:>11}", tier_color(r), r.label(), fmt_size(report.total(r)));
     }
-    println!("  {:<9} {:>11}", "TOTAL", bold(&fmt_size(report.grand_total())));
+    out!("  {:<9} {:>11}", "TOTAL", bold(&fmt_size(report.grand_total())));
 
     for r in Risk::ALL {
         let items: Vec<_> = report.findings.iter().filter(|f| f.risk == r).collect();
         if items.is_empty() {
             continue;
         }
-        println!("\n{}── {} ──\x1b[0m", tier_color(r), r.label());
+        out!("\n{}── {} ──\x1b[0m", tier_color(r), r.label());
         for f in items {
-            println!("  {:>11}  {}", fmt_size(f.bytes), bold(&f.title));
+            out!("  {:>11}  {}", fmt_size(f.bytes), bold(&f.title));
             let cmd = f.command_text();
             let cmd = if cmd.len() > 300 { format!("{} …", &cmd[..cmd.floor_char_boundary(300)]) } else { cmd };
-            println!("               \x1b[33m$ {cmd}\x1b[0m");
+            out!("               \x1b[33m$ {cmd}\x1b[0m");
         }
     }
     for n in &report.notes {
-        println!("\n\x1b[2mnote: {n}\x1b[0m");
+        out!("\n\x1b[2mnote: {n}\x1b[0m");
     }
-    println!(
+    out!(
         "\nNothing was deleted. Run the commands above yourself, or start the interactive \
          mode (without --summary) to select and clean items."
     );
+    // Colour only on a terminal, and never with NO_COLOR set.
+    let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    print!("{}", if color { o } else { util::strip_ansi(&o) });
     Ok(())
 }
 

@@ -7,7 +7,7 @@
 //! app is running are reported as a manual step instead of an action.
 
 use super::ubuntu::{self, RuleContext};
-use super::{sudo_rm_files, Action, CheckOutput, Finding, Risk};
+use super::{sudo_delete_files, Action, CheckOutput, Finding, Risk};
 use crate::scanner;
 use crate::util::{shq, tilde};
 use rayon::prelude::*;
@@ -29,6 +29,26 @@ pub struct Dirs {
     pub cargo: PathBuf,
     pub pip: Option<PathBuf>,
     pub npm: Option<PathBuf>,
+    /// UV_CACHE_DIR, GOCACHE, GOMODCACHE, GOPATH: where those tools really
+    /// keep their caches (and what their clean commands empty).
+    pub uv: Option<PathBuf>,
+    pub gocache: Option<PathBuf>,
+    pub gomodcache: Option<PathBuf>,
+    pub gopath: Option<PathBuf>,
+}
+
+/// A cache location from the environment is only used when it can't be
+/// something much bigger than a cache: an absolute path at least three levels
+/// deep that is neither the home folder, one of its ancestors, nor a system
+/// directory.
+fn plausible_override(p: &Path, home: &Path) -> bool {
+    const SYSTEM: &[&str] = &["/usr", "/etc", "/boot", "/var", "/snap", "/bin", "/sbin", "/lib", "/proc", "/sys", "/dev", "/run"];
+    p.is_absolute()
+        && !p.components().any(|c| matches!(c, std::path::Component::ParentDir))
+        && p.components().count() >= 3
+        && p != home
+        && !home.starts_with(p)
+        && !SYSTEM.iter().any(|s| p.starts_with(s) && !p.starts_with("/var/tmp"))
 }
 
 /// Environment lookup; tests use an empty environment so they never pick up
@@ -45,7 +65,11 @@ fn real_env(var: &str) -> Option<std::ffi::OsString> {
 
 impl Dirs {
     pub fn resolve(ctx: &RuleContext) -> Self {
-        Self::from_env(&ctx.home, ctx.is_root, &real_env)
+        // The overrides describe $HOME's owner: ignore them when another home
+        // is being analysed (--home).
+        let canon = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let own_home = real_env("HOME").map(PathBuf::from).is_some_and(|h| canon(&h) == canon(&ctx.home));
+        Self::from_env(&ctx.home, ctx.is_root || !own_home, &real_env)
     }
 
     /// Environment overrides are only trusted when running as the user: under
@@ -55,7 +79,7 @@ impl Dirs {
             if is_root {
                 return None;
             }
-            env(name).map(PathBuf::from).filter(|p| p.is_absolute())
+            env(name).map(PathBuf::from).filter(|p| plausible_override(p, home))
         };
         Dirs {
             cache: var("XDG_CACHE_HOME").unwrap_or_else(|| home.join(".cache")),
@@ -64,6 +88,11 @@ impl Dirs {
             cargo: var("CARGO_HOME").unwrap_or_else(|| home.join(".cargo")),
             pip: var("PIP_CACHE_DIR"),
             npm: var("npm_config_cache"),
+            uv: var("UV_CACHE_DIR"),
+            gocache: var("GOCACHE"),
+            gomodcache: var("GOMODCACHE"),
+            // GOPATH may list several; the module cache lives in the first.
+            gopath: var("GOPATH").and_then(|p| std::env::split_paths(&p).next()).filter(|p| plausible_override(p, home)),
             home: home.to_path_buf(),
         }
     }
@@ -94,6 +123,25 @@ pub fn processes() -> Vec<(String, String)> {
 }
 
 use crate::sysdirs::which;
+
+/// App ids of running Flatpak apps: every process inside a Flatpak sandbox
+/// has FLATPAK_ID in its environment (bwrap hides the id from its cmdline).
+fn flatpak_running_ids() -> HashSet<String> {
+    let mut ids = HashSet::new();
+    let Ok(rd) = fs::read_dir("/proc") else { return ids };
+    for e in rd.flatten() {
+        if !e.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(env) = fs::read(e.path().join("environ")) else { continue };
+        for var in env.split(|&b| b == 0) {
+            if let Some(id) = var.strip_prefix(b"FLATPAK_ID=") {
+                ids.insert(String::from_utf8_lossy(id).into_owned());
+            }
+        }
+    }
+    ids
+}
 
 /// Chromium/Electron hold a `SingletonLock` symlink in their profile dir while
 /// running; Firefox a `lock` symlink in each profile. A lock left behind by a
@@ -182,6 +230,8 @@ fn contents_finding(
     detail: String,
     command: Option<String>,
 ) -> Option<Finding> {
+    // A symlinked cache folder points somewhere else entirely: leave it alone.
+    let dirs: Vec<PathBuf> = dirs.into_iter().filter(|d| fs::symlink_metadata(d).is_ok_and(|m| m.is_dir())).collect();
     if dirs.is_empty() || bytes == 0 {
         return None;
     }
@@ -255,7 +305,12 @@ pub fn browser_findings(d: &Dirs, procs: &[(String, String)]) -> Vec<Finding> {
         let mut dirs: Vec<PathBuf> = rd.flatten().map(|e| e.path().join("cache2")).filter(|p| p.is_dir()).collect();
         dirs.sort();
         let bytes = dirs.iter().map(|p| contents_bytes(p)).sum();
-        let running = fs::read_dir(&profiles).map_or(false, |rd| rd.flatten().any(|e| has_lock(&e.path(), "lock")));
+        // Newer Firefox releases keep new profiles under ~/.config/mozilla.
+        let xdg_profiles = if id == "firefox-cache" { Some(d.config.join("mozilla/firefox")) } else { None };
+        let running = [Some(profiles.clone()), xdg_profiles]
+            .into_iter()
+            .flatten()
+            .any(|dir| fs::read_dir(&dir).map_or(false, |rd| rd.flatten().any(|e| has_lock(&e.path(), "lock"))));
         let detail = format!("{name}'s disk cache. Firefox rebuilds it while you browse; profiles and bookmarks are not touched.");
         if let Some(f) = contents_finding(&d.home, id, "Browser", &format!("{name} disk cache"), dirs, bytes, Risk::Safe, detail, None) {
             out.push(if running { manual(f, &format!("{name} is running: close it first, then Re-analyze.")) } else { f });
@@ -264,6 +319,7 @@ pub fn browser_findings(d: &Dirs, procs: &[(String, String)]) -> Vec<Finding> {
 
     // Flatpak apps keep their XDG cache in ~/.var/app/<id>/cache.
     if let Ok(rd) = fs::read_dir(d.home.join(".var/app")) {
+        let running_flatpaks = flatpak_running_ids();
         let mut idle = Vec::new();
         let mut busy = Vec::new();
         for e in rd.flatten() {
@@ -272,10 +328,15 @@ pub fn browser_findings(d: &Dirs, procs: &[(String, String)]) -> Vec<Finding> {
             if !cache.is_dir() {
                 continue;
             }
-            if procs.iter().any(|(_, cmd)| cmd.contains(&app)) {
+            if running_flatpaks.contains(&app) || procs.iter().any(|(_, cmd)| cmd.contains(&app)) {
                 busy.push(app);
-            } else {
-                idle.push(cache);
+            } else if let Ok(rd) = fs::read_dir(&cache) {
+                // cache/tmp is the app's TMPDIR: never part of the cleanup.
+                idle.extend(
+                    rd.flatten()
+                        .filter(|c| c.file_name() != "tmp" && c.file_type().is_ok_and(|t| t.is_dir()))
+                        .map(|c| c.path()),
+                );
             }
         }
         idle.sort();
@@ -336,12 +397,15 @@ pub fn electron_findings(d: &Dirs) -> Vec<Finding> {
 
 /// Caches of language tooling, each via its own clean command when installed.
 pub fn tool_cache_findings(d: &Dirs, is_root: bool, procs: &[(String, String)], have: &dyn Fn(&str) -> bool) -> Vec<Finding> {
+    // Under sudo a tool would run as root with root's HOME and clean root's
+    // cache, not the one measured here: never offer tool commands then.
+    let have = |b: &str| !is_root && have(b);
     let mut out = Vec::new();
     let h = &d.home;
     let mut add = |f: Option<Finding>| out.extend(f);
 
     // uv links its cache into virtualenvs: count only what nothing else holds.
-    let uv = d.cache.join("uv");
+    let uv = d.uv.clone().unwrap_or_else(|| d.cache.join("uv"));
     if uv.is_dir() {
         let cmd = have("uv").then(|| "uv cache clean".to_string());
         add(contents_finding(h, "uv-cache", "Python", "uv cache", vec![uv.clone()], unique_bytes(&uv), Risk::Safe,
@@ -383,10 +447,10 @@ pub fn tool_cache_findings(d: &Dirs, is_root: bool, procs: &[(String, String)], 
     }
 
     // Go: build cache is pure cache; the module cache is read-only on disk.
-    let gobuild = d.cache.join("go-build");
+    let gobuild = d.gocache.clone().unwrap_or_else(|| d.cache.join("go-build"));
     out.extend(contents_finding(h, "go-build-cache", "Go", "Go build cache", existing(&[gobuild.clone()]), contents_bytes(&gobuild), Risk::Safe,
         "Compiled Go packages; rebuilt as needed. Equivalent: go clean -cache".into(), have("go").then(|| "go clean -cache".to_string())));
-    let gomod = h.join("go/pkg/mod");
+    let gomod = d.gomodcache.clone().unwrap_or_else(|| d.gopath.clone().unwrap_or_else(|| h.join("go")).join("pkg/mod"));
     if let Some(f) = contents_finding(h, "go-mod-cache", "Go", "Go module cache", existing(&[gomod.clone()]), contents_bytes(&gomod), Risk::Moderate,
         "Downloaded Go modules; re-downloaded by the next build (needs network). The files are \
          read-only, so only `go clean -modcache` can remove them.".into(), Some("go clean -modcache".into()))
@@ -407,9 +471,11 @@ pub fn tool_cache_findings(d: &Dirs, is_root: bool, procs: &[(String, String)], 
             continue;
         }
         let conda = h.join(base).join("bin/conda");
-        let cmd = conda.is_file().then(|| format!("{} clean -a -y", shq(&conda.to_string_lossy())));
-        out.extend(contents_finding(h, &format!("conda-pkgs:{base}"), "Python", "Conda package cache", vec![pkgs.clone()], unique_bytes(&pkgs), Risk::Safe,
-            "Package tarballs and unpacked packages no environment still links to.".into(), cmd));
+        let cmd = format!("{} clean -a -y", shq(&conda.to_string_lossy()));
+        let f = contents_finding(h, &format!("conda-pkgs:{base}"), "Python", "Conda package cache", vec![pkgs.clone()], unique_bytes(&pkgs), Risk::Safe,
+            "Package tarballs and unpacked packages no environment still links to.".into(), Some(cmd.clone()));
+        // Environments may soft-link into pkgs: only conda itself may clean it.
+        out.extend(f.map(|f| if conda.is_file() && !is_root { f } else { manual(f, &format!("Run `{cmd}` as yourself.")) }));
     }
 
     // Hugging Face models: may be large, gated or the only copy of a fine-tune.
@@ -425,7 +491,7 @@ pub fn tool_cache_findings(d: &Dirs, is_root: bool, procs: &[(String, String)], 
     // GNOME search index.
     let tracker = d.cache.join("tracker3");
     if let Some(f) = contents_finding(h, "tracker3", "Desktop", "GNOME search index (tracker3)", existing(&[tracker.clone()]), contents_bytes(&tracker), Risk::Moderate,
-        "The file-search index; GNOME rebuilds it in the background (uses CPU for a while).".into(), Some("tracker3 reset -s -r".into()))
+        "The file-search index; GNOME rebuilds it in the background (uses CPU for a while).".into(), Some("tracker3 reset -s".into()))
     {
         out.push(if have("tracker3") { f } else { manual(f, "tracker3 is not installed here.") });
     }
@@ -559,7 +625,7 @@ pub fn snapd_orphan_findings(cache: &Path) -> CheckOutput {
                  any more (link count 1). Installed snaps are hard-linked here with link count 2 \
                  and are never listed."
             .into(),
-        action: Action::Shell { command: sudo_rm_files(&paths) },
+        action: Action::Shell { command: sudo_delete_files(cache, &paths) },
         paths,
         needs_root: true,
     })
@@ -621,25 +687,26 @@ pub fn autoremove_findings(sim_autoremove: &str, dpkg_status: &str, simulate_pur
         detail: format!(
             "Packages installed automatically as dependencies that no installed package needs \
              any more (what `apt autoremove` reports). Old kernels are left to the kernel rule. \
-             Size from dpkg's Installed-Size.\nPackages: {}",
+             Removed like `apt autoremove` does: configuration files you may have edited are \
+             kept. Size from dpkg's Installed-Size.\nPackages: {}",
             pkgs.join(", ")
         ),
         paths: Vec::new(),
         action: Action::Shell {
-            command: format!("sudo apt-get -o DPkg::Lock::Timeout=120 purge -y {}", pkgs.iter().map(|p| shq(p)).collect::<Vec<_>>().join(" ")),
+            command: format!("sudo apt-get -o DPkg::Lock::Timeout=120 remove -y {}", pkgs.iter().map(|p| shq(p)).collect::<Vec<_>>().join(" ")),
         },
         needs_root: true,
     };
-    // Same guard as kernels: the purge must remove exactly this list.
+    // Same guard as kernels: the removal must change exactly this list.
     match simulate_purge(&pkgs) {
         Some(sim) => {
             let listed: HashSet<&str> = pkgs.iter().map(|s| s.as_str()).collect();
             let extra: Vec<String> = ubuntu::apt_sim_removals(&sim).into_iter().filter(|p| !listed.contains(p.as_str())).collect();
             if !extra.is_empty() {
-                f = manual(f, &format!("Purging these would also remove: {}. Review with `apt-get -s autoremove`.", extra.join(", ")));
+                f = manual(f, &format!("Removing these would also change: {}. Review with `apt-get -s autoremove`.", extra.join(", ")));
             }
         }
-        None => f = manual(f, "Could not simulate the purge with apt-get; review with `apt-get -s autoremove`."),
+        None => f = manual(f, "Could not simulate the removal with apt-get; review with `apt-get -s autoremove`."),
     }
     CheckOutput::one(f)
 }
@@ -695,7 +762,7 @@ pub fn coredump_findings(dir: &Path) -> CheckOutput {
         risk: Risk::Safe,
         bytes: files.iter().map(|f| f.1).sum(),
         detail: "Memory images of crashed programs kept by systemd-coredump for debugging.".into(),
-        action: Action::Shell { command: sudo_rm_files(&paths) },
+        action: Action::Shell { command: sudo_delete_files(dir, &paths) },
         paths,
         needs_root: true,
     })
@@ -731,6 +798,13 @@ pub fn flatpak_unused(apps: &str, runtimes: &str) -> Vec<String> {
     out
 }
 
+mod dirs {
+    /// ~/.local/share/flatpak of the current user (never created by us).
+    pub fn user_flatpak_exists() -> bool {
+        std::env::var_os("HOME").is_some_and(|h| std::path::Path::new(&h).join(".local/share/flatpak").is_dir())
+    }
+}
+
 fn flatpak_findings(procs_ok: bool) -> CheckOutput {
     if which("flatpak").is_none() || !procs_ok {
         return CheckOutput::default();
@@ -738,22 +812,37 @@ fn flatpak_findings(procs_ok: bool) -> CheckOutput {
     let run = |args: &[&str]| -> String {
         Command::new("flatpak").args(args).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
     };
-    let apps = run(&["list", "--app", "--columns=application,runtime"]);
-    let runtimes = run(&["list", "--runtime", "--columns=ref"]);
+    // Only the system installation is cleaned, but apps installed per user
+    // also use its runtimes. `flatpak` creates a per-user installation when
+    // asked about it, so it is only queried when one already exists.
+    let mut apps = run(&["list", "--system", "--app", "--columns=application,runtime"]);
+    if dirs::user_flatpak_exists() {
+        apps.push_str(&run(&["list", "--user", "--app", "--columns=application,runtime"]));
+    }
+    let runtimes = run(&["list", "--system", "--runtime", "--columns=ref"]);
     let unused = flatpak_unused(&apps, &runtimes);
     if unused.is_empty() {
         return CheckOutput::default();
     }
     let mut bytes = 0;
     let mut paths = Vec::new();
+    // Only runtimes of the system installation, uninstalled by exact ref: a
+    // bare `--unused` would let flatpak pick its own (different) set.
+    let mut refs = Vec::new();
     for r in &unused {
         for inst in &crate::sysdirs::get().flatpak_system {
             let p = inst.join("runtime").join(r);
             if p.is_dir() {
                 bytes += unique_ostree_bytes(&p);
                 paths.push(p);
+                if !refs.contains(r) {
+                    refs.push(r.clone());
+                }
             }
         }
+    }
+    if refs.is_empty() {
+        return CheckOutput::default();
     }
     CheckOutput::one(Finding {
         id: "flatpak-unused".into(),
@@ -768,7 +857,9 @@ fn flatpak_findings(procs_ok: bool) -> CheckOutput {
             unused.join(", ")
         ),
         paths,
-        action: Action::Shell { command: "sudo flatpak uninstall --system --unused -y --noninteractive".into() },
+        action: Action::Shell {
+            command: format!("sudo flatpak uninstall --system -y --noninteractive {}", refs.iter().map(|r| shq(r)).collect::<Vec<_>>().join(" ")),
+        },
         needs_root: true,
     })
 }
@@ -813,10 +904,10 @@ pub fn run_checks(ctx: &RuleContext) -> CheckOutput {
             CheckOutput { findings: other_trash_findings(&mi, uid, &d.home), notes: Vec::new() }
         }),
         Box::new(|| {
-            let sim = Command::new("apt-get").args(["-s", "autoremove", "--purge"]).output()
+            let sim = Command::new("apt-get").args(["-s", "autoremove"]).env("LC_ALL", "C").stdin(std::process::Stdio::null()).output()
                 .map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
             let status = fs::read_to_string(&crate::sysdirs::get().dpkg_status).unwrap_or_default();
-            autoremove_findings(&sim, &status, &ubuntu::apt_simulate_purge)
+            autoremove_findings(&sim, &status, &ubuntu::apt_simulate_remove)
         }),
         Box::new(|| flatpak_findings(true)),
     ];
@@ -916,12 +1007,13 @@ mod tests {
     #[test]
     fn flatpak_app_cache_skips_running_apps() {
         let d = TempDir::new("fpcache");
-        d.file(".var/app/org.a.App/cache/x", 2 << 20);
+        d.file(".var/app/org.a.App/cache/sub/x", 2 << 20);
+        d.file(".var/app/org.a.App/cache/tmp/in-use", 2 << 20); // the app's TMPDIR: kept
         d.file(".var/app/org.b.Busy/cache/y", 2 << 20);
         d.file(".var/app/org.a.App/data/keep", 2 << 20);
         let procs = vec![("bwrap".to_string(), "bwrap --args org.b.Busy".to_string())];
         let f = browser_findings(&dirs(&d), &procs).into_iter().find(|f| f.id == "flatpak-app-cache").unwrap();
-        assert_eq!(removed_paths(&f), vec![d.join(".var/app/org.a.App/cache")]);
+        assert_eq!(removed_paths(&f), vec![d.join(".var/app/org.a.App/cache/sub")]);
         assert!(f.detail.contains("org.b.Busy"));
     }
 
@@ -992,7 +1084,7 @@ mod tests {
         let out = snapd_orphan_findings(&cache);
         let f = &out.findings[0];
         assert_eq!(f.paths, vec![orphan]);
-        assert!(f.needs_root && f.command_text().contains("sudo rm -f --"));
+        assert!(f.needs_root && f.command_text().starts_with("sudo find "));
         assert!(snapd_orphan_findings(&d.join("nope")).findings.is_empty());
     }
 
@@ -1004,7 +1096,7 @@ mod tests {
         let ok = |_: &[String]| Some("Remv libfoo1 [1]\nRemv python3-bar [2]\n".to_string());
         let f = &autoremove_findings(sim, status, &ok).findings[0];
         assert_eq!(f.bytes, 3 * 1024 * 1024);
-        assert!(f.is_actionable() && f.command_text().contains("purge -y libfoo1 python3-bar"));
+        assert!(f.is_actionable() && f.command_text().contains("remove -y libfoo1 python3-bar"));
         let extra = |_: &[String]| Some("Remv libfoo1 [1]\nRemv ubuntu-desktop [2]\n".to_string());
         let f = &autoremove_findings(sim, status, &extra).findings[0];
         assert!(!f.is_actionable() && f.detail.contains("ubuntu-desktop"));
@@ -1045,9 +1137,14 @@ mod tests {
         let dd = dirs(&d);
         let have_all = |_: &str| true;
         let none = |_: &str| false;
-        let f = tool_cache_findings(&dd, true, &[], &have_all);
+        let f = tool_cache_findings(&dd, false, &[], &have_all);
         let by = |id: &str| f.iter().find(|x| x.id == id).cloned().unwrap();
         assert_eq!(by("uv-cache").command_text(), "uv cache clean");
+        // Under sudo the tools would clean root's caches: no tool commands then.
+        let fr = tool_cache_findings(&dd, true, &[], &have_all);
+        let byr = |id: &str| fr.iter().find(|x| x.id == id).cloned().unwrap();
+        assert!(!byr("uv-cache").command_text().contains("uv cache clean"));
+        assert!(!byr("go-mod-cache").is_actionable());
         assert!(by("npx-cache").is_actionable());
         assert!(!by("huggingface-hub").is_actionable() && by("huggingface-hub").risk == Risk::Caution);
         let busy = vec![("node".to_string(), format!("node {}/.npm/_npx/abc/node_modules/.bin/srv", d.path().display()))];
@@ -1079,6 +1176,19 @@ mod tests {
         let r = Dirs::from_env(Path::new("/home/x"), true, &env);
         assert_eq!(r.cache, PathBuf::from("/home/x/.cache"));
         assert_eq!(r.cargo, PathBuf::from("/home/x/.cargo"));
+    }
+
+    #[test]
+    fn implausible_cache_overrides_are_ignored() {
+        let home = Path::new("/home/x");
+        for bad in ["/home/x", "/home", "/", "/usr/share", "/var/cache", "relative/dir", "/home/x/../y", "/etc/pip"] {
+            let env = |v: &str| (v == "PIP_CACHE_DIR").then(|| std::ffi::OsString::from(bad));
+            assert_eq!(Dirs::from_env(home, false, &env).pip, None, "{bad}");
+        }
+        for good in ["/home/x/.pipcache", "/mnt/data/pip-cache", "/opt/cargo", "/var/tmp/pip"] {
+            let env = |v: &str| (v == "PIP_CACHE_DIR").then(|| std::ffi::OsString::from(good));
+            assert_eq!(Dirs::from_env(home, false, &env).pip, Some(PathBuf::from(good)), "{good}");
+        }
     }
 
     #[test]

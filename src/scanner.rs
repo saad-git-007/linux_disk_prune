@@ -178,13 +178,22 @@ fn disk_bytes(md: &fs::Metadata) -> u64 {
 }
 
 /// Build a rayon pool with generous stacks: work stealing can nest recursion.
+/// When the system can't give that many threads (memory limits), retry with
+/// half as many rather than failing the scan.
 fn pool(threads: usize) -> io::Result<rayon::ThreadPool> {
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .stack_size(32 << 20)
-        .thread_name(|i| format!("scan-{i}"))
-        .build()
-        .map_err(io::Error::other)
+    let mut n = threads;
+    loop {
+        let built = rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .stack_size(32 << 20)
+            .thread_name(|i| format!("scan-{i}"))
+            .build();
+        match built {
+            Ok(p) => return Ok(p),
+            Err(_) if n > 1 => n /= 2,
+            Err(e) => return Err(io::Error::other(e)),
+        }
+    }
 }
 
 /// Scan `root` and build the full size tree.

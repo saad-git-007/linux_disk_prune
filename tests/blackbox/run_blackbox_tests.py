@@ -263,6 +263,9 @@ def test_artifacts():
     pos["rust"] = mk("code/rustproj/target", "Cargo.toml", b"[package]\nname='x'\n")
     pos["rust_tag"] = mk("code/tagonly/target", "CACHEDIR.TAG", b"Signature: 8a477f597d28d172789f06886806bc55\n")
     pos["node"] = mk("code/webapp/node_modules", "package.json", b"{}")
+    # node_modules only counts when a package manager can restore it (lockfile)
+    with open(os.path.join(home, "code/webapp/package-lock.json"), "wb") as f:
+        f.write(b"{}")
     # nested node_modules inside the flagged one must not be flagged separately
     mk("code/webapp/node_modules/dep/node_modules", "package.json", b"{}")
     # __pycache__ group: two dirs 600K each -> group > 1MiB
@@ -339,7 +342,8 @@ def test_artifacts():
 
 # --------------------------------------------------------------------------- 4
 CACHES = {  # rel path -> (id-ish, tier)
-    ".cache/thumbnails": "SAFE", ".cache/pip": "SAFE",
+    # pip: only pip's own sub-folders (what `pip cache purge` clears) since the safety audit.
+    ".cache/thumbnails": "SAFE", ".cache/pip/http": "SAFE",
     # Cargo registry is MODERATE since the safety review (deleting it mid-build breaks cargo).
     ".cargo/registry/cache": "MODERATE", ".cargo/registry/src": "MODERATE",
     ".cargo/git/checkouts": "SAFE", ".npm/_cacache": "SAFE",
@@ -374,8 +378,8 @@ def test_caches():
             f"du incl. dir entry={exp_full} (tool excludes the kept dir's own {exp_full - exp_contents}B; cmd keeps dir via -mindepth 1)")
         segs = split_segments(f["command"])
         ok = len(segs) == len(f["paths"]) and all(
-            s == ["find", p, "-mindepth", "1", "-delete"] for s, p in zip(segs, f["paths"]))
-        rec(f"4.{f['id']} command argv exact", ok, "find <dir> -mindepth 1 -delete per path", segs)
+            s == ["find", p, "-xdev", "-mindepth", "1", "-delete"] for s, p in zip(segs, f["paths"]))
+        rec(f"4.{f['id']} command argv exact", ok, "find <dir> -xdev -mindepth 1 -delete per path", segs)
         rec(f"4.{f['id']} needs_root false", f["needs_root"] is False, False, f["needs_root"])
     decoy_hits = [p for p in by_path if not any(p == os.path.join(home, r) for r in CACHES)]
     rec("4.no decoy/other user paths flagged", not decoy_hits, "none", decoy_hits)
@@ -429,6 +433,7 @@ def test_quoting():
         projs[os.path.join(pr, "target")] = "rust"
         pr2 = os.path.join(home, "node " + n)
         write_file(os.path.join(pr2, "package.json"), 2, rand=False)
+        write_file(os.path.join(pr2, "package-lock.json"), 2, rand=False)
         write_file(os.path.join(pr2, "node_modules", "blob.bin"), 1100 * 1024)
         projs[os.path.join(pr2, "node_modules")] = "node"
     # a pycache under a weird dir
@@ -454,7 +459,7 @@ def test_quoting():
         if not rec(f"5.{label!r} flagged", f is not None, "flagged", "flagged" if f else "NOT flagged"):
             continue
         argv = shlex.split(f["command"])
-        rec(f"5.{label!r} command argv", argv == ["rm", "-rf", "--", p], ["rm", "-rf", "--", label], argv[:3] + [os.path.relpath(a, home) if a.startswith("/") else a for a in argv[3:]])
+        rec(f"5.{label!r} command argv", argv == ["rm", "-rf", "--one-file-system", "--", p], ["rm", "-rf", "--one-file-system", "--", label], argv[:4] + [os.path.relpath(a, home) if a.startswith("/") else a for a in argv[4:]])
         m = re.search(r"Equivalent: (.*)", f["detail"])
         if kind == "rust" and m:
             ea = shlex.split(m.group(1))

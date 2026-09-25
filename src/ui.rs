@@ -270,6 +270,9 @@ fn disk_info(root: &Path) -> Option<Disk> {
 }
 
 struct App {
+    /// A suggestion checked only because Review was opened on it: unchecked
+    /// again if the review is cancelled.
+    auto_checked: Option<String>,
     cfg: Config,
     tab: Tab,
     tx: mpsc::Sender<Msg>,
@@ -343,6 +346,7 @@ impl App {
             prune_page: 10,
             checked: HashSet::new(),
             modal: Modal::None,
+            auto_checked: None,
             hits: Vec::new(),
             status: None,
             disk,
@@ -569,6 +573,7 @@ impl App {
                 if let Some(f) = self.report.findings.get(self.prune_cursor) {
                     if f.is_actionable() {
                         self.checked.insert(f.id.clone());
+                        self.auto_checked = Some(f.id.clone());
                     }
                 }
             }
@@ -580,7 +585,15 @@ impl App {
         self.modal = Modal::Review;
     }
 
+    fn cancel_review(&mut self) {
+        if let Some(id) = self.auto_checked.take() {
+            self.checked.remove(&id);
+        }
+        self.modal = Modal::None;
+    }
+
     fn confirm_review(&mut self, mode: RemoveMode) {
+        self.auto_checked = None;
         if self.cfg.no_exec {
             self.flash("Execution is disabled (--no-exec)");
             return;
@@ -619,7 +632,7 @@ impl App {
                         self.modal = Modal::None;
                         self.flash("Unmarked everything");
                     }
-                    _ => self.modal = Modal::None,
+                    _ => self.cancel_review(),
                 }
                 return;
             }
@@ -946,7 +959,7 @@ impl App {
                     self.confirm_review(if self.trash_ok { RemoveMode::Trash } else { RemoveMode::Permanent })
                 }
                 Btn::RunPermanent => self.confirm_review(RemoveMode::Permanent),
-                Btn::Cancel => self.modal = Modal::None,
+                Btn::Cancel => self.cancel_review(),
             },
         }
     }
@@ -958,10 +971,14 @@ type Term = Terminal<CrosstermBackend<Stdout>>;
 
 fn setup_terminal() -> io::Result<Term> {
     enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
-    let mut t = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    t.clear()?;
-    Ok(t)
+    let init = || -> io::Result<Term> {
+        execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+        let mut t = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+        t.clear()?;
+        Ok(t)
+    };
+    // Never leave the terminal raw / on the alternate screen after a failure.
+    init().inspect_err(|_| restore_terminal())
 }
 
 fn restore_terminal() {
@@ -970,6 +987,20 @@ fn restore_terminal() {
 }
 
 pub fn run(cfg: Config) -> Result<()> {
+    use std::io::IsTerminal;
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        anyhow::bail!("the terminal UI needs an interactive terminal (and no desktop display was found); use --summary or --json for a report");
+    }
+    // `kill`, a closed SSH session or a stray SIGINT must not leave the
+    // terminal raw and on the alternate screen.
+    if let Ok(mut signals) = signal_hook::iterator::Signals::new([signal_hook::consts::SIGTERM, signal_hook::consts::SIGHUP, signal_hook::consts::SIGINT, signal_hook::consts::SIGQUIT]) {
+        std::thread::spawn(move || {
+            if let Some(sig) = signals.forever().next() {
+                restore_terminal();
+                std::process::exit(128 + sig);
+            }
+        });
+    }
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         restore_terminal();
@@ -1069,6 +1100,13 @@ fn draw(f: &mut Frame, app: &mut App) {
     app.hits.clear();
     let area = f.area();
     f.render_widget(Block::new().style(Style::new().bg(c(BG)).fg(c(FG))), area);
+    // Below this the panels have no room; say so instead of drawing garbage.
+    if area.height < 12 || area.width < 40 {
+        let msg = format!("Terminal too small ({}x{}): need at least 40x12 · q quits", area.width, area.height);
+        let line = Rect::new(area.x, area.y + area.height / 2, area.width, area.height.min(1));
+        f.render_widget(Paragraph::new(truncate(&msg, area.width as usize)).style(st(MODERATE)), line);
+        return;
+    }
     let [header, tabs, gauge, body, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
@@ -1868,6 +1906,9 @@ fn draw_prune(f: &mut Frame, app: &mut App, area: Rect) {
         (" ⏎ review & clean… ", Btn::Review, AMBER),
         (" r re-analyze ", Btn::Reanalyze, BORDER),
     ];
+    if buttons.height == 0 || buttons.width < 4 {
+        return;
+    }
     let mut x = buttons.x + 1;
     for (label, btn, bg) in btns {
         let w = label.chars().count() as u16;

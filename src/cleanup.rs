@@ -26,6 +26,9 @@ fn check_removable(p: &Path, home: &Path) -> Result<(), String> {
     if PROTECTED.iter().any(|x| p == Path::new(x)) || p == home {
         return Err("refusing protected path".into());
     }
+    if home.starts_with(p) {
+        return Err("refusing a folder that contains your home folder".into());
+    }
     if p.components().count() < 3 {
         return Err("refusing top-level path".into());
     }
@@ -63,32 +66,51 @@ fn mounts_inside<'a>(p: &Path, mounts: &'a [PathBuf], include_self: bool) -> Opt
     mounts.iter().find(|m| m.starts_with(p) && (include_self || m.as_path() != p))
 }
 
+/// First directory below `dir` (not following symlinks) that lives on another
+/// device than `dev`: a mount point `/proc/self/mountinfo` did not list.
+fn foreign_device(dir: &Path, dev: u64, dev_of: &dyn Fn(&fs::Metadata) -> u64) -> Option<PathBuf> {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let child = e.path();
+            if let Ok(md) = fs::symlink_metadata(&child) {
+                if md.is_dir() {
+                    if dev_of(&md) != dev {
+                        return Some(child);
+                    }
+                    stack.push(child);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Delete everything below `dir` without following symlinks and without
-/// entering a directory on another device than `dev` (a mount point that
-/// `/proc/self/mountinfo` did not list). Crossing stops the whole removal.
+/// entering a directory on another device than `dev`. Crossing stops the
+/// whole removal before anything is deleted.
+///
+/// Sub-trees go through `std::fs::remove_dir_all`, which walks with directory
+/// handles and `O_NOFOLLOW`: a directory swapped for a symlink mid-way (even
+/// when this runs as root) cannot redirect the deletion elsewhere.
 fn remove_contents(dir: &Path, dev: u64, dev_of: &dyn Fn(&fs::Metadata) -> u64) -> io::Result<()> {
+    if let Some(m) = foreign_device(dir, dev, dev_of) {
+        return Err(io::Error::new(
+            io::ErrorKind::CrossesDevices,
+            format!("refusing to cross into another filesystem at {}", m.display()),
+        ));
+    }
     let mut first_err = None;
     for entry in fs::read_dir(dir)? {
         let child = entry?.path();
         let res = match fs::symlink_metadata(&child) {
-            Ok(md) if md.is_dir() => {
-                if dev_of(&md) != dev {
-                    return Err(io::Error::new(
-                        io::ErrorKind::CrossesDevices,
-                        format!("refusing to cross into another filesystem at {}", child.display()),
-                    ));
-                }
-                remove_contents(&child, dev, dev_of).and_then(|_| fs::remove_dir(&child))
-            }
+            Ok(md) if md.is_dir() => fs::remove_dir_all(&child),
             Ok(_) => fs::remove_file(&child),
             Err(e) => Err(e),
         };
-        match res {
-            Err(e) if e.kind() == io::ErrorKind::CrossesDevices => return Err(e),
-            Err(e) => {
-                first_err.get_or_insert(e);
-            }
-            Ok(()) => {}
+        if let Err(e) = res {
+            first_err.get_or_insert(e);
         }
     }
     first_err.map_or(Ok(()), Err)
@@ -136,12 +158,18 @@ pub fn remove_path(p: &Path, keep_dir: bool, home: &Path) -> io::Result<()> {
             )));
         }
     }
+    if keep_dir && md.file_type().is_symlink() {
+        // "Empty this folder" on a symlink: its contents live elsewhere.
+        return Ok(());
+    }
     if !md.is_dir() {
         return fs::remove_file(p);
     }
+    // Without the mount table a bind mount of the same filesystem could not
+    // be told apart from a folder: refuse rather than guess.
     let mounts = fs::read_to_string("/proc/self/mountinfo")
         .map(|t| parse_mountinfo(&t))
-        .unwrap_or_default();
+        .map_err(|e| io::Error::other(format!("refusing: cannot read the mount table ({e})")))?;
     remove_dir_checked(p, keep_dir, &mounts, &|md| md.dev())
 }
 
@@ -161,7 +189,15 @@ pub fn execute(findings: &[Finding], home: &Path) -> usize {
             Action::Shell { command } => {
                 println!("\x1b[33m$ {command}\x1b[0m");
                 let _ = io::stdout().flush();
-                match Command::new("sh").arg("-c").arg(command).status() {
+                // On stdin, not as an argument: one argument is capped at 128 KiB.
+                let run = || -> io::Result<std::process::ExitStatus> {
+                    let mut child = Command::new("sh").arg("-s").stdin(std::process::Stdio::piped()).spawn()?;
+                    let mut stdin = child.stdin.take().expect("piped stdin");
+                    stdin.write_all(format!("( {command} ) </dev/null\n").as_bytes())?;
+                    drop(stdin);
+                    child.wait()
+                };
+                match run() {
                     Ok(s) if s.success() => true,
                     Ok(s) => {
                         println!("\x1b[31mcommand exited with {s}\x1b[0m");
@@ -286,6 +322,14 @@ pub fn trash_available() -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn never_removes_a_folder_containing_home() {
+        let home = Path::new("/mnt/data/users/u");
+        assert!(check_removable(Path::new("/mnt/data/users"), home).is_err());
+        assert!(check_removable(Path::new("/mnt/data"), home).is_err());
+        assert!(check_removable(Path::new("/mnt/data/users/u/.cache/x"), home).is_ok());
+    }
+
     use super::*;
     use std::path::PathBuf;
 

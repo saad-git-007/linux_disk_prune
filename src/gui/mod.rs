@@ -6,6 +6,7 @@
 //! Ubuntu 22.04 recommendation engine.
 
 mod exec;
+mod large;
 mod sunburst;
 mod theme;
 mod treemap;
@@ -49,6 +50,7 @@ enum View {
     Sunburst,
     Tree,
     Prune,
+    Large,
 }
 
 #[derive(Clone, Copy)]
@@ -111,6 +113,7 @@ pub struct GuiApp {
     job_disk_before: Option<u64>,
     about_open: bool,
     path_input: String,
+    large: large::LargeState,
 
     disk: Option<Disk>,
     toast: Option<(String, f64)>,
@@ -167,6 +170,7 @@ impl GuiApp {
             job: None,
             job_disk_before: None,
             about_open: false,
+            large: large::LargeState::default(),
             toast: None,
             motion: true,
             last_active: 0.0,
@@ -400,7 +404,7 @@ impl GuiApp {
                 View::Sunburst => self.sun_start = Some(now),
                 View::Treemap => self.intro_start = Some(now),
                 View::Tree => self.tree_scroll_to_sel = true,
-                View::Prune => {}
+                View::Prune | View::Large => {}
             }
         }
         self.view = v;
@@ -432,6 +436,9 @@ impl GuiApp {
         }
         if pressed(Key::Num4) {
             self.set_view(View::Prune, ctx);
+        }
+        if pressed(Key::Num5) {
+            self.set_view(View::Large, ctx);
         }
         if pressed(Key::C) {
             self.open_review(ctx);
@@ -537,6 +544,70 @@ impl GuiApp {
                         self.toggle_finding(self.prune_cursor);
                     }
                 }
+            }
+            View::Large => {
+                if pressed(Key::Space) || pressed(Key::X) {
+                    self.toggle_mark(ctx, self.sel);
+                }
+            }
+        }
+    }
+
+    /// Right-click menu for a cleanup suggestion.
+    fn finding_menu(&mut self, ui: &mut egui::Ui, i: usize) {
+        let Some(f) = self.report.findings.get(i).cloned() else { return };
+        let title: String = if f.title.chars().count() > 48 { format!("{}…", f.title.chars().take(47).collect::<String>()) } else { f.title.clone() };
+        ui.label(RichText::new(title).strong());
+        ui.label(RichText::new(format!("frees ~{} · {}", fmt_size(f.bytes), f.risk.label())).color(theme::risk(f.risk)));
+        ui.separator();
+        let home = self.home().to_path_buf();
+        match f.paths.len() {
+            0 => {
+                ui.label(RichText::new("No files to show: this runs a tool command").small().color(DIM));
+            }
+            1 => {
+                if ui.button("📂  Open in Files").on_hover_text(f.paths[0].display().to_string()).clicked() {
+                    reveal(&f.paths[0]);
+                    ui.close();
+                }
+            }
+            n => {
+                ui.menu_button(format!("📂  Open in Files ({n})"), |ui| {
+                    for p in f.paths.iter().take(30) {
+                        if ui.button(tilde(p, &home)).clicked() {
+                            reveal(p);
+                            ui.close();
+                        }
+                    }
+                    if n > 30 {
+                        ui.label(RichText::new(format!("… and {} more (see the details panel)", n - 30)).small().color(FAINT));
+                    }
+                });
+            }
+        }
+        if !f.paths.is_empty() && ui.button(if f.paths.len() == 1 { "📋  Copy path" } else { "📋  Copy paths" }).clicked() {
+            ui.ctx().copy_text(f.paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n"));
+            ui.close();
+        }
+        if ui.button("📋  Copy command").clicked() {
+            ui.ctx().copy_text(f.command_text());
+            ui.close();
+        }
+        if let Some(t) = self.tree.clone() {
+            if let Some(n) = f.paths.iter().find_map(|p| t.find(p)) {
+                if ui.button("▦  Show in treemap").clicked() {
+                    self.select(n);
+                    self.view = View::Treemap;
+                    ui.close();
+                }
+            }
+        }
+        if f.is_actionable() {
+            ui.separator();
+            let checked = self.checked.contains(&f.id);
+            if ui.button(if checked { "↩  Deselect" } else { "✔  Select for cleanup" }).clicked() {
+                self.toggle_finding(i);
+                ui.close();
             }
         }
     }
@@ -706,6 +777,7 @@ impl GuiApp {
             (View::Sunburst, "◉ Sunburst".to_string()),
             (View::Tree, "☰ Tree".to_string()),
             (View::Prune, prune_label),
+            (View::Large, "⬚ Large items".to_string()),
         ];
         let font = FontId::proportional(14.5);
         let widths: Vec<f32> = tabs.iter().map(|(_, l)| ui.painter().layout_no_wrap(l.clone(), font.clone(), FG).size().x + 30.0).collect();
@@ -750,7 +822,8 @@ impl GuiApp {
                         View::Treemap => "click select · double-click / scroll ↑ zoom in · scroll ↓ / Backspace out · Space mark · right-click menu · [ ] depth",
                         View::Tree => "↑↓ move · → ← open/close · Space mark · right-click menu",
                         View::Sunburst => "click select · double-click / scroll ↑ zoom in · click the hub / Backspace out · Space mark · [ ] rings",
-                        View::Prune => "tick suggestions · Review & clean runs them (root actions ask for your password once)",
+                        View::Prune => "tick suggestions · right-click one to open its files · Review & clean runs them (root actions ask for your password once)",
+                        View::Large => self.large_hint(),
                     };
                     ui.label(RichText::new(hint).color(FAINT));
                 }
@@ -1108,9 +1181,12 @@ impl GuiApp {
             self.toggle_mark(ui.ctx(), n);
             ui.close();
         }
-        let dir = if node.kind == NodeKind::Dir { path.clone() } else { path.parent().unwrap_or(&path).to_path_buf() };
         if ui.button("📂  Open in Files").clicked() {
-            let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
+            reveal(&path);
+            ui.close();
+        }
+        if node.kind == NodeKind::File && ui.button("🗋  Open file").on_hover_text("Open with its default application").clicked() {
+            let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
             ui.close();
         }
         if ui.button("📋  Copy path").clicked() {
@@ -1393,6 +1469,7 @@ impl eframe::App for GuiApp {
                     (View::Treemap, true) => self.treemap_view(ui),
                     (View::Sunburst, true) => self.sunburst_view(ui),
                     (View::Tree, true) => self.tree_view(ui),
+                    (View::Large, true) => self.large_view(ui),
                 }
             });
         self.toast_overlay(&ctx);
@@ -1405,6 +1482,58 @@ impl eframe::App for GuiApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.engine.cancel();
     }
+}
+
+/// Show `path` in the file manager: folders are opened, files are revealed
+/// (highlighted in their folder) through the FileManager1 D-Bus interface
+/// that Nautilus and most Linux file managers implement, falling back to
+/// opening the containing folder.
+pub(crate) fn reveal(path: &Path) {
+    let path = path.to_path_buf();
+    std::thread::spawn(move || {
+        use std::process::{Command, Stdio};
+        let quiet = |c: &mut Command| c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+        let is_dir = std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir());
+        if is_dir {
+            if quiet(Command::new("xdg-open").arg(&path)) {
+                return;
+            }
+        } else {
+            let uri = file_uri(&path);
+            let shown = quiet(Command::new("gdbus").args([
+                "call", "--session", "--dest", "org.freedesktop.FileManager1",
+                "--object-path", "/org/freedesktop/FileManager1",
+                "--method", "org.freedesktop.FileManager1.ShowItems",
+            ]).arg(format!("['{uri}']")).arg(""));
+            if shown {
+                return;
+            }
+        }
+        // Missing or unreachable: open the nearest existing folder.
+        let mut dir = if is_dir { path.parent().map(Path::to_path_buf) } else { path.parent().map(Path::to_path_buf) };
+        while let Some(d) = dir.clone() {
+            if d.is_dir() {
+                let _ = quiet(Command::new("xdg-open").arg(&d));
+                return;
+            }
+            dir = d.parent().map(Path::to_path_buf);
+        }
+    });
+}
+
+/// file:// URI with every byte outside the unreserved set percent-encoded
+/// (safe inside the single-quoted GVariant string too).
+fn file_uri(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut s = String::from("file://");
+    for &b in path.as_os_str().as_bytes() {
+        if b.is_ascii_alphanumeric() || b"/-._~".contains(&b) {
+            s.push(b as char);
+        } else {
+            s.push_str(&format!("%{b:02X}"));
+        }
+    }
+    s
 }
 
 /// The main-action button: a jelly→cyan gradient pill that glows on hover.

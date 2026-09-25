@@ -5,7 +5,7 @@ pub mod ubuntu;
 
 use crate::util::{shq, shq_path};
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Findings smaller than this are not worth showing.
 pub const MIN_FINDING_BYTES: u64 = 1 << 20;
@@ -77,12 +77,12 @@ impl Finding {
                 if *keep_dir {
                     paths
                         .iter()
-                        .map(|p| format!("{sudo}find {} -mindepth 1 -delete", shq_path(p)))
+                        .map(|p| format!("{sudo}find {} -xdev -mindepth 1 -delete", shq_path(p)))
                         .collect::<Vec<_>>()
                         .join(" && ")
                 } else {
                     let list: Vec<String> = paths.iter().map(|p| shq_path(p)).collect();
-                    format!("{sudo}rm -rf -- {}", list.join(" "))
+                    format!("{sudo}rm -rf --one-file-system -- {}", list.join(" "))
                 }
             }
             Action::Manual => "(no automatic command — see details)".into(),
@@ -151,12 +151,31 @@ impl Report {
     }
 }
 
-/// Shell command that runs `sudo rm -f` on an explicit list of files.
+/// Root command deleting an explicit list of regular files below `root`.
+///
+/// `find` walks down from `root` without following symlinks and deletes with
+/// `unlinkat` relative to the directory it is in. A directory that is swapped
+/// for a symlink between analysis and cleanup (possible in group-writable
+/// trees such as /var/log) can therefore not redirect the deletion to another
+/// place, and only regular files whose path matches exactly are touched.
 /// Callers must pass only valid UTF-8 paths (a lossy path would be another file).
-pub fn sudo_rm_files(paths: &[PathBuf]) -> String {
+pub fn sudo_delete_files(root: &Path, paths: &[PathBuf]) -> String {
     debug_assert!(paths.iter().all(|p| p.to_str().is_some()), "non-UTF-8 path in shell command");
-    let list: Vec<String> = paths.iter().map(|p| shq(&p.to_string_lossy())).collect();
-    format!("sudo rm -f -- {}", list.join(" "))
+    debug_assert!(paths.iter().all(|p| p.starts_with(root)), "path outside the find root");
+    let pats: Vec<String> = paths.iter().map(|p| format!("-path {}", shq(&glob_escape(&p.to_string_lossy())))).collect();
+    format!("sudo find {} -xdev -type f \\( {} \\) -delete", shq_path(root), pats.join(" -o "))
+}
+
+/// Escape the characters `find -path` treats as wildcards.
+fn glob_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '*' | '?' | '[' | ']' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -313,16 +332,36 @@ mod tests {
     }
 
     #[test]
-    fn sudo_rm_files_quotes_hostile_paths() {
+    fn sudo_delete_files_quotes_hostile_paths() {
         let d = TempDir::new("cmd-sudo-rm");
         let targets = hostile_files(&d);
         d.file("t/keep", 1);
         d.file("t/star-bystander", 1);
-        let cmd = sudo_rm_files(&targets);
-        assert!(cmd.starts_with("sudo rm -f -- "));
+        let cmd = sudo_delete_files(d.path(), &targets);
+        assert!(cmd.starts_with("sudo find "));
         let (ok, _) = sh(&format!("{SHIM}{cmd}"), &d.join("t"));
         assert!(ok, "{cmd}");
         assert_only_targets_gone(&d, &targets);
+    }
+
+    #[test]
+    fn sudo_delete_files_never_follows_a_swapped_in_symlink() {
+        // Analysis saw logs/app/old.1; before cleanup, logs/app became a
+        // symlink to a directory holding a precious file of the same name.
+        let d = TempDir::new("cmd-sudo-toctou");
+        let target = d.join("logs/app/old.1");
+        let cmd = sudo_delete_files(&d.join("logs"), &[target.clone()]);
+        let victim = d.file("victim/old.1", 10);
+        d.dir("logs");
+        std::os::unix::fs::symlink(d.join("victim"), d.join("logs/app")).unwrap();
+        let (ok, _) = sh(&format!("{SHIM}{cmd}"), d.path());
+        assert!(ok, "{cmd}");
+        assert!(victim.exists(), "deleted through a symlinked directory");
+        // Without the swap the file does go.
+        std::fs::remove_file(d.join("logs/app")).unwrap();
+        d.file("logs/app/old.1", 10);
+        let (ok, _) = sh(&format!("{SHIM}{cmd}"), d.path());
+        assert!(ok && !target.exists());
     }
 
     #[test]
@@ -330,12 +369,31 @@ mod tests {
         // Print argv instead of running rm: sh must see exactly our paths.
         let d = TempDir::new("cmd-argv");
         let paths: Vec<PathBuf> = HOSTILE.iter().map(|n| d.join(n)).collect();
-        let shim = "sudo() { shift 3; for a in \"$@\"; do printf '%s\\0' \"$a\"; done; }\n";
-        let (ok, out) = sh(&format!("{shim}{}", sudo_rm_files(&paths)), d.path());
+        let shim = "sudo() { for a in \"$@\"; do printf '%s\\0' \"$a\"; done; }\n";
+        let (ok, out) = sh(&format!("{shim}{}", sudo_delete_files(d.path(), &paths)), d.path());
         assert!(ok);
-        let got: Vec<&str> = out.split('\0').filter(|s| !s.is_empty()).collect();
+        let args: Vec<&str> = out.split('\0').collect();
+        // Every -path pattern, with find's wildcard escapes undone, is exactly one path.
+        let got: Vec<String> = args
+            .windows(2)
+            .filter(|w| w[0] == "-path")
+            .map(|w| {
+                let mut out = String::new();
+                let mut esc = false;
+                for c in w[1].chars() {
+                    if c == '\\' && !esc {
+                        esc = true;
+                        continue;
+                    }
+                    esc = false;
+                    out.push(c);
+                }
+                out
+            })
+            .collect();
         let want: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
         assert_eq!(got, want);
+        assert_eq!(&args[..4], &["find", d.path().to_str().unwrap(), "-xdev", "-type"]);
     }
 
     #[test]

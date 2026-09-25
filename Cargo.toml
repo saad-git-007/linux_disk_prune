@@ -1,6 +1,6 @@
 [package]
 name = "linux_disk_prune"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.95"
 description = "Fast disk analyzer and safe cleanup assistant for Ubuntu 22.04: GPU treemap desktop app + terminal UI (inspired by tobi/disktree)"
@@ -13,6 +13,7 @@ keywords = ["disk", "treemap", "cleanup", "ubuntu", "gui"]
 categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
+signal-hook = "0.3"
 anyhow = "1.0.104"
 bytesize = "2.7.0"
 clap = { version = "4.6.7", features = ["derive"] }

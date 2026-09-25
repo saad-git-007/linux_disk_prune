@@ -290,10 +290,8 @@ impl GuiApp {
                         let s = self.sel;
                         self.toggle_mark(ui.ctx(), s);
                     }
-                    if ui.add(egui::Button::new("📂 Open").corner_radius(14)).clicked() {
-                        let p = t.path_of(self.sel);
-                        let dir = if n.kind == NodeKind::Dir { p } else { p.parent().map(|x| x.to_path_buf()).unwrap_or(p) };
-                        let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+                    if ui.add(egui::Button::new("📂 Open").corner_radius(14)).on_hover_text("Show in Files").clicked() {
+                        super::reveal(&t.path_of(self.sel));
                     }
                 });
                 // Largest inside, as mini bars.
@@ -327,7 +325,9 @@ impl GuiApp {
                     ui.label(RichText::new(if self.engine.rules_pending > 0 { "Analyzing…" } else { "Nothing notable to reclaim." }).color(DIM));
                 }
                 let mut open = None;
-                for (i, f) in top.into_iter().take(7) {
+                let top: Vec<(usize, Finding)> = top.into_iter().take(7).map(|(i, f)| (i, f.clone())).collect();
+                for (i, f) in &top {
+                    let (i, f) = (*i, f);
                     let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
                     let p = ui.painter_at(r);
                     if resp.hovered() {
@@ -337,9 +337,11 @@ impl GuiApp {
                     p.circle_filled(pos2(r.left() + 6.0, r.center().y), 3.5, theme::risk(f.risk));
                     p.text(pos2(r.left() + 82.0, r.center().y), Align2::RIGHT_CENTER, fmt_size(f.bytes), FontId::proportional(12.5), FG);
                     p.with_clip_rect(r).text(pos2(r.left() + 92.0, r.center().y), Align2::LEFT_CENTER, &f.title, FontId::proportional(12.5), DIM);
-                    if resp.on_hover_text(&f.title).clicked() {
+                    let resp = resp.on_hover_text(&f.title);
+                    if resp.clicked() {
                         open = Some(i);
                     }
+                    resp.context_menu(|ui| self.finding_menu(ui, i));
                 }
                 if let Some(i) = open {
                     self.prune_cursor = i;
@@ -577,7 +579,7 @@ impl GuiApp {
                 ui.painter().line_segment([r.left_center(), r.right_center()], Stroke::new(1.0, theme::mix(PANEL, theme::risk(risk), 0.4)));
             });
             for i in items {
-                let f = &self.report.findings[i];
+                let f = self.report.findings[i].clone();
                 let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
                 let p = ui.painter_at(r);
                 let selected = i == self.prune_cursor;
@@ -617,6 +619,15 @@ impl GuiApp {
                     }
                     self.prune_cursor = i;
                 }
+                if resp.secondary_clicked() {
+                    self.prune_cursor = i;
+                }
+                if resp.double_clicked() {
+                    if let Some(p0) = f.paths.first() {
+                        super::reveal(p0);
+                    }
+                }
+                resp.on_hover_text("right-click: open in Files, copy path or command").context_menu(|ui| self.finding_menu(ui, i));
             }
         }
         if let Some(i) = toggle {
@@ -664,6 +675,11 @@ impl GuiApp {
                 let i = self.prune_cursor;
                 self.toggle_finding(i);
             }
+            if let Some(p0) = f.paths.first() {
+                if ui.add(egui::Button::new("📂 Open in Files").corner_radius(14)).on_hover_text(p0.display().to_string()).clicked() {
+                    super::reveal(p0);
+                }
+            }
             if let Some(t) = self.tree.clone() {
                 if let Some(n) = f.paths.iter().find_map(|p| t.find(p)) {
                     if ui.add(egui::Button::new("▦ Show in treemap").corner_radius(14)).clicked() {
@@ -675,9 +691,33 @@ impl GuiApp {
         });
         if !f.paths.is_empty() {
             ui.add_space(10.0);
-            section(ui, &format!("PATHS ({})", f.paths.len()), ACCENT);
+            section(ui, &format!("PATHS ({}) · click to open in Files", f.paths.len()), ACCENT);
+            let home = self.home().to_path_buf();
             for p in f.paths.iter().take(40) {
-                ui.label(RichText::new(tilde(p, self.home())).small().color(DIM));
+                let resp = ui.add(egui::Label::new(RichText::new(format!("📂 {}", tilde(p, &home))).small().color(DIM)).sense(Sense::click()).truncate());
+                let resp = if resp.hovered() {
+                    ui.painter().line_segment([resp.rect.left_bottom(), resp.rect.right_bottom()], Stroke::new(1.0, ACCENT));
+                    resp.on_hover_text(p.display().to_string())
+                } else {
+                    resp
+                };
+                if resp.clicked() {
+                    super::reveal(p);
+                }
+                resp.context_menu(|ui| {
+                    if ui.button("📂  Open in Files").clicked() {
+                        super::reveal(p);
+                        ui.close();
+                    }
+                    if p.is_file() && ui.button("🗋  Open file").clicked() {
+                        let _ = std::process::Command::new("xdg-open").arg(p).spawn();
+                        ui.close();
+                    }
+                    if ui.button("📋  Copy path").clicked() {
+                        ui.ctx().copy_text(p.display().to_string());
+                        ui.close();
+                    }
+                });
             }
             if f.paths.len() > 40 {
                 ui.label(RichText::new(format!("… and {} more", f.paths.len() - 40)).small().color(FAINT));

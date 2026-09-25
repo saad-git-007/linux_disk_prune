@@ -4,11 +4,11 @@
 
 **A fast, good-looking disk analyzer and *safe* cleanup assistant for Ubuntu 22.04, written in Rust.**
 
-See where your space goes as a treemap or sunburst, then reclaim it with a recommendation engine that knows Ubuntu: APT caches, old kernels, snap revisions, the journal, browser and Electron app caches, developer caches and build output. It shows exactly how much each item frees and the exact command it will run.
+See where your space goes as a treemap, sunburst or list of large items. Then reclaim it with a recommendation engine that knows Ubuntu: APT caches, old kernels, snap revisions, the journal, browser and Electron app caches, developer caches and build output. It shows exactly how much each item frees and the exact command it will run.
 
 <img src="docs/screenshots/sunburst-intro.gif" width="640" alt="Sunburst view animating in">
 
-**[⬇️ Download the .deb](https://github.com/saad-git-007/linux_disk_prune/releases/latest/download/linux-disk-prune_0.2.0_amd64.deb)** · [Install instructions](#install) · [Screenshots](#screenshots)
+**[⬇️ Download the .deb](https://github.com/saad-git-007/linux_disk_prune/releases/latest/download/linux-disk-prune_0.3.0_amd64.deb)** · [Install](#quick-install) · [What's different from disktree](#highlights-and-how-it-differs-from-disktree) · [Screenshots](#screenshots)
 
 *Inspired by [disktree](https://github.com/tobi/disktree) by Tobi Lütke ♥*
 
@@ -16,11 +16,64 @@ See where your space goes as a treemap or sunburst, then reclaim it with a recom
 
 ---
 
+## Quick install
+
+On Ubuntu 22.04 or newer (x86_64):
+
+```sh
+wget https://github.com/saad-git-007/linux_disk_prune/releases/latest/download/linux-disk-prune_0.3.0_amd64.deb
+sudo apt install ./linux-disk-prune_0.3.0_amd64.deb
+```
+
+Then open **Disk Prune** from the app launcher, or run `linux_disk_prune` in a terminal. There's also a [checksum, double-click install, uninstall and build-from-source guide](#install).
+
+## Highlights, and how it differs from disktree
+
+[disktree](https://github.com/tobi/disktree) is a lovely treemap for finding what fills a disk, built for Omarchy (Arch) with GPUI. Disk Prune started from its ideas and goes further: it **tells you what is safe to delete on Ubuntu, and deletes it for you, safely**.
+
+**What Disk Prune adds**
+- 🧠 **An Ubuntu cleanup engine with 40+ rules.** Where disktree hatches folders by kind, Disk Prune asks the tool that owns the data:
+  - dpkg, `apt-get -s`, `snap list`, `journalctl`, `flatpak`, Docker
+  - It covers APT, old kernels, snap revisions, `apt autoremove`, journal, logs, crash and core dumps, browser and Electron caches, old IDE versions, pip, uv, cargo, npm, Go, Gradle and more.
+- 🛡️ **SAFE / MODERATE / CAUTION tiers** with a plain-language reason for each finding, and the **exact command** it will run.
+- ⚙️ **It runs the cleanup for you.** Admin actions are batched behind **one** password prompt (`pkexec`) with a live log; disktree refuses package-managed trees.
+- 📂 **Open anything it suggests.** Right-click a suggestion (or any tile or file) to *Open in Files* (the file is highlighted in its folder), open the file, copy paths or copy the command.
+- 📏 **Large items tab.** Type a size in MB (or `2G`) and see every file and folder above it as a mosaic, a size histogram, a breakdown by kind and a ranked list. Filter by files or folders and by name, and hide parent folders.
+- ◉ **More views:** treemap, **sunburst**, size tree, prune dashboard and large items, plus a "Top savings" panel everywhere.
+- 🖥️ **Runs on any Ubuntu setup.**
+  - Vulkan on the integrated GPU, with an automatic OpenGL fallback.
+  - Works on remote and virtual displays.
+  - A **terminal UI** for SSH, and `--summary` / `--json` for scripts.
+- 📦 **A `.deb` package** with a launcher entry, icon and *Open with* for folders.
+- ✅ **Heavily tested.** 111 unit tests and five independent suites check it. Those suites run every cleanup for real against real apps (Chrome, Firefox, Electron, pip, uv, npm, cargo, go, pnpm) in sandboxes, and attack it with a safety audit.
+
+| | disktree | **Disk Prune** |
+|---|---|---|
+| Reclaimable space | Hatched by folder *kind* | Rule engine that asks dpkg, apt, snap, journald, flatpak, Docker and each language tool; exact sizes of what is really freed |
+| System cleanup | Refuses package-managed trees | Runs `apt-get clean`, kernel purge (simulated first), `snap remove --revision`, `journalctl --vacuum-size` behind one password prompt |
+| Risk guidance | Remove or keep | SAFE / MODERATE / CAUTION with reasons; running apps are detected and skipped |
+| Views | Treemap | Treemap, sunburst, tree, prune dashboard, **large items** |
+| Reveal a suggestion | — | Right-click → *Open in Files* / open file / copy path |
+| Hardware | GPU that GPUI can drive | Vulkan or OpenGL, CPU fallback on remote desktops |
+| No display | — | Terminal UI, `--summary`, `--json` |
+| Install | Source or tarball | `.deb` |
+
+**Where disktree is still ahead:**
+- an *Age* colouring mode
+- git status for checkouts (changes, stashes, unpushed commits)
+- smooth magnify-zoom and panning
+- btrfs subvolume awareness
+- a memoised scan that widens from `~` to `/` without rescanning
+
+If you are on Omarchy/Arch, use disktree. If you are on Ubuntu and want to reclaim space rather than just find it, that's what Disk Prune is for.
+
 ## Screenshots
 
 | Treemap | Sunburst |
 |---|---|
 | ![Treemap](docs/screenshots/treemap.png) | ![Sunburst](docs/screenshots/sunburst.png) |
+| **Large items (over 100 MB)** | **Right-click a suggestion → Open in Files** |
+| ![Large items](docs/screenshots/large.png) | ![Context menu](docs/screenshots/context-menu.png) |
 | **Prune dashboard** | **Review before anything runs** |
 | ![Prune](docs/screenshots/prune.png) | ![Review](docs/screenshots/review.png) |
 | **Scanning (sonar)** | **Tree** |
@@ -30,26 +83,9 @@ See where your space goes as a treemap or sunburst, then reclaim it with a recom
 
 <sub>The screenshots use a synthetic demo home folder.</sub>
 
-## Why Disk Prune? How it compares to disktree
-
-[disktree](https://github.com/tobi/disktree) is a lovely treemap for finding what fills a disk, built for Omarchy (Arch) with GPUI. Disk Prune started from its ideas and goes further in the direction of **telling you what is safe to delete on Ubuntu, and doing it for you, safely**.
-
-| | disktree | **Disk Prune** |
-|---|---|---|
-| What gets flagged as reclaimable | Hatched by folder *kind*: caches, sync history, package stores, build output | A **rule engine for Ubuntu 22.04** with 40+ checks: APT, old kernels and their leftovers, disabled snap revisions, orphaned snapd downloads, `apt autoremove`, unused Flatpak runtimes, journal, logs, crash and core dumps, browser and Electron app caches, old IDE versions, pip/uv/cargo/npm/Go/Gradle caches, Docker, Rust `target/`, `node_modules`. Each finding has a size, a risk tier and the exact command |
-| System cleanup | Refuses package-managed trees and points you to the right tools | **Runs those tools for you**: `apt-get clean`, kernel purge (dry-run with `apt-get -s` first), `snap remove --revision`, `journalctl --vacuum-size`, all behind **one** `pkexec` password prompt with a live log |
-| Risk guidance | Remove or keep | **SAFE / MODERATE / CAUTION** tiers, with a plain-language reason and a "free now vs. after" gauge |
-| Views | Treemap | Treemap, **sunburst**, size tree and a prune dashboard |
-| Hardware | Needs a GPU that GPUI can drive (Vulkan) on Wayland/X11 | Vulkan on the integrated GPU when it can present, **automatic OpenGL fallback**, and it works on virtual/remote displays |
-| No display? | — | **Terminal UI** (`--tui`) over SSH, plus `--summary` / `--json` for scripts and cron |
-| Install on Ubuntu | Build from source or tarball | **`.deb` package** with launcher entry, icon and *Open with* for folders |
-| Verification | Removal rules are unit-tested | 103 unit tests, an **independent black-box suite (178 checks)** against GNU `du`, and a **live-system validator** that re-derives every recommendation from `apt`, `dpkg`, `snap`, `journalctl`, `find` and `pgrep` |
-
-**Where disktree is still ahead.** It has an *Age* colouring mode, name filtering, git status for checkouts (changes, stashes, unpushed commits), smooth magnify-zoom and panning, btrfs subvolume awareness, and a memoised scan that widens from `~` to `/` without rescanning. If you are on Omarchy/Arch, use disktree. If you are on Ubuntu and want to reclaim space rather than just find it, that's what Disk Prune is for.
-
 ## Features
 
-### Four ways to look at a disk
+### Five ways to look at a disk
 - **▦ Treemap:** a nested, squarified mosaic.
   - Colour shows the *kind* of data: code, git, build output, caches, toolchains, media, documents, VMs & containers, logs, system.
   - Space you can reclaim gets marching lime stripes.
@@ -57,7 +93,18 @@ See where your space goes as a treemap or sunburst, then reclaim it with a recom
 - **◉ Sunburst:** the hierarchy as concentric rings, with a clock-wipe intro, radial labels and lime rims on reclaimable space. Click the glowing hub to go up.
 - **☰ Tree:** a virtualised size tree with gradient share bars and a tag on every item that has a cleanup suggestion.
 - **♻ Prune:** an animated donut of everything reclaimable, cards per risk tier, and a checklist. Each item shows its exact command, with a Copy button.
+- **⬚ Large items:** every file and folder above a size you type (in MB, or `2G`), shown as:
+  - a squarified mosaic coloured by kind
+  - a size-distribution histogram
+  - a "what it is" donut
+  - a ranked list
+
+  Filter by files or folders and by name. *Innermost folders only* hides parents that are only big because of a sub-folder, and nested items are never counted twice.
 - **Top savings:** the side panel of every view lists the biggest wins, so you can jump straight to them.
+- **Open what it suggests:** right-click any suggestion, tile, row or path.
+  - *Open in Files* opens folders; files are highlighted in their folder through the FileManager1 D-Bus interface.
+  - The same menu has *Open file*, *Copy path(s)*, *Copy command* and *Show in treemap*.
+  - Double-click a suggestion or a large item to reveal it.
 
 ### The "Abyssal" look
 A deep-sea bioluminescence theme: ink-violet depths, glowing cyan, jellyfish magenta and plankton lime.
@@ -82,14 +129,14 @@ Every rule asks the owning tool what is safe, instead of guessing from folder na
 |---|---|---|---|
 | APT cache | downloaded `*.deb` archives and partial downloads (package lists are rebuilt on the next `apt`, so they aren't counted) | SAFE | `sudo apt-get clean` |
 | Kernels | installed kernels other than the **running one and the two newest** | MODERATE | `sudo apt-get purge -y <exact packages>`, simulated with `apt-get -s` first; becomes a manual step if the simulation would remove anything else |
-| Kernel leftovers | `/lib/modules/<ver>` dirs no installed package owns, plus the matching `rc` dpkg records | MODERATE | `sudo dpkg --purge <rc packages>; sudo rm -rf -- <dirs>` |
-| Snap | revisions `snap list --all` marks **disabled**, including each revision's saved data; shows what is freed now vs. after snapd drops its cached copy | MODERATE | `sudo snap remove <name> --revision=<rev>` |
-| Orphaned snap downloads | files in snapd's cache that no installed snap links to any more | SAFE | `sudo rm -f --` (exact list) |
-| Unused packages | what `apt-get -s autoremove` would remove, excluding kernels (sized from dpkg) | MODERATE | `sudo apt-get purge -y <exact packages>`, manual if purging them would take anything else with it |
-| Flatpak | runtimes no installed app uses | MODERATE | `sudo flatpak uninstall --system --unused` |
-| Journal | the exact archived journal files `--vacuum-size` would delete (default keep 500 MiB) | MODERATE | `sudo journalctl --vacuum-size=500M` |
-| Logs & dumps | rotated logs (`*.gz`, `*.1` …), `/var/crash` reports, systemd core dumps | MODERATE / SAFE | `sudo rm -f --` (exact list) |
-| Docker | dangling images, unused **non-shared** builder cache | SAFE | `docker image prune -f`, `docker builder prune -f` |
+| Kernel leftovers | `/lib/modules/<ver>` dirs of **removed** kernels older than the newest installed one (never a kernel dpkg is still installing), plus their `rc` dpkg records | MODERATE | `sudo dpkg --purge <rc packages>`, then per dir a root step that **re-checks dpkg and /boot right before** `rm -rf --one-file-system` |
+| Snap | revisions `snap list --all` marks **disabled**, including each revision's saved data; shows what is freed now vs. after snapd drops its cached copy. A disabled revision *newer* than the active one (after `snap revert`) holds your newest data and is only a manual CAUTION step | MODERATE | `sudo snap remove <name> --revision=<rev>` |
+| Orphaned snap downloads | files in snapd's cache that no installed snap links to any more | SAFE | symlink-safe `sudo find … -delete` of the exact files |
+| Unused packages | what `apt-get -s autoremove` would remove, excluding kernels (sized from dpkg) | MODERATE | `sudo apt-get remove -y <exact packages>` (like `apt autoremove`: your config files are kept); manual if the simulation shows anything else changing |
+| Flatpak | system runtimes no installed app (system or yours) uses | MODERATE | `sudo flatpak uninstall --system <exact refs>` |
+| Journal | the exact archived journal files `--vacuum-size` would delete (default keep 500 MiB) | MODERATE | `sudo journalctl --directory=<store> --vacuum-size=500M` |
+| Logs & dumps | rotated logs (`*.gz`, `*.xz`, `*.1`–`*.999`, `*.log.YYYYMMDD`; never MySQL binlogs or per-host files), apport's `.crash` files in `/var/crash`, systemd core dumps | MODERATE / SAFE | symlink-safe `sudo find <root> -xdev -type f ( -path … ) -delete` of the exact files |
+| Docker | dangling images, unused **non-shared** builder cache | SAFE | `docker -H <measured socket> image prune -f` / `builder prune -f` |
 
 **Your home folder**
 
@@ -98,24 +145,30 @@ Every rule asks the owning tool what is safe, instead of guessing from folder na
 | Browsers | Chrome, Chromium, Brave, Edge `Cache` / `Code Cache` / `GPUCache`; Firefox (deb and snap) `cache2`; Flatpak app caches. Profiles, logins and history are never touched | SAFE; a manual step while the browser is running |
 | Electron apps | the Chromium caches of VS Code, Slack, Discord, … (only folders that really are a Chromium disk cache) | SAFE; skipped while the app is running |
 | Editors & IDEs | extension versions VS Code/Cursor list in `.obsolete`; caches of **older** JetBrains IDE versions (the newest is kept) | SAFE |
-| Python | pip, uv (only data not hard-linked into a venv), Poetry, Conda packages, `__pycache__` | SAFE |
+| Python | pip (its own `http`/`wheels` folders), uv (only data not hard-linked into a venv), Poetry, Conda packages (via `conda clean`), `__pycache__` | SAFE |
 | Node | npm `_cacache`, npx, Yarn, `pnpm store prune` | SAFE |
 | Go / Java / Rust | Go build cache (SAFE), Go module cache, Gradle, Cargo registry (MODERATE), Cargo git checkouts | SAFE / MODERATE |
 | Tools | Selenium and Playwright browsers, Mesa shader cache | SAFE |
 | Desktop | thumbnails (SAFE), GNOME search index `tracker3` (MODERATE), Trash, including `.Trash-<uid>` on other drives (MODERATE) | |
 | AI models | Hugging Face hub cache: only a manual step, since re-downloading can be many GB | CAUTION |
-| Projects | Rust `target/` next to a `Cargo.toml` or with `CACHEDIR.TAG`; `node_modules/` next to a `package.json` | CAUTION |
+| Projects | Rust `target/` next to a `Cargo.toml` or with `CACHEDIR.TAG`; `node_modules/` of a project with a lockfile (never an app's bundled `resources/app`, never global npm installs) | CAUTION |
 
 **How it decides something is safe**
 - **Ask the owner.** Kernels come from dpkg plus `uname -r`, snaps from `snap list --all`, unused packages from an `apt-get -s` simulation, Flatpak runtimes from `flatpak list`. Caches are cleaned with the tool that owns them (`uv cache clean`, `go clean -cache`, `pnpm store prune`, `tracker3 reset`) when it's installed.
 - **Empty caches, keep the folders.** Cache rules delete only a cache's *contents*. Settings, profiles, logins, history, local storage and virtualenvs stay.
-- **Don't pull the rug.** Browsers, Electron apps and npx programs that are running (lock file or process check) become a manual step. Stale locks left by a crash are recognised. Missing tools also turn a rule into a manual step instead of a guess.
+- **Don't pull the rug.**
+  - Browsers, Electron apps, Flatpak apps and npx programs that are running (lock file, `FLATPAK_ID` or process check) become a manual step.
+  - Stale locks left by a crash are recognised.
+  - A missing tool turns a rule into a manual step instead of a guess.
+  - Under `sudo`, tool commands (`uv`, `go`, `conda` …) are never run as root against your caches.
 - **Count only what is actually freed.** Sizes are real blocks on disk. Hard-linked data still used elsewhere (uv/pnpm/conda stores, snapd's cache) isn't counted. The journal figure replays journald's own vacuum.
 - **Never flagged:** Ollama/LLM models, browser profiles, Docker volumes, `/var/lib/apt/lists`, rustup toolchains, anything in hidden app folders apart from the caches above, `~/snap` app data.
 
 **Works on any Ubuntu 22.04 machine.** Nothing is tied to one user or layout:
-- User paths follow `$HOME`, `XDG_CACHE_HOME` / `XDG_CONFIG_HOME` / `XDG_DATA_HOME`, `CARGO_HOME`, `PIP_CACHE_DIR` and `npm_config_cache`. Under `sudo`, environment overrides are ignored.
-- System paths are discovered at runtime from `apt-config dump`, `snap debug paths`, `flatpak --installations`, journald's persistent or volatile store and `APPORT_REPORT_DIR`.
+- User paths follow `$HOME`, `XDG_CACHE_HOME` / `XDG_CONFIG_HOME` / `XDG_DATA_HOME`, `CARGO_HOME`, `PIP_CACHE_DIR`, `npm_config_cache`, `UV_CACHE_DIR`, `GOCACHE`, `GOMODCACHE` and `GOPATH`.
+  - An override that could be much more than a cache is ignored: your home, one of its parents, a system directory, or a relative path.
+  - Overrides are also ignored under `sudo` or with `--home`.
+- System paths are discovered at runtime from `apt-config dump`, `snap debug paths`, `flatpak --installations` and journald's persistent or volatile store.
 - Fonts come from fontconfig, and `pkexec` is found on `PATH`.
 
 ## Safety model
@@ -127,8 +180,17 @@ Every rule asks the owning tool what is safe, instead of guessing from folder na
   - Refuses `/`, top-level system dirs, your home folder, the scan root, and anything outside the scan root.
   - Refuses package-managed trees (`/usr`, `/etc`, `/boot`, `/var/lib`, `/snap`, …).
   - Refuses paths with symlinked parents.
-  - **Never crosses into another mounted filesystem.** Deletion stops at a device boundary, and it refuses when `/proc/self/mountinfo` lists a mount point below the path.
-  - Symlinks are unlinked, never followed.
+  - Refuses any folder that contains your home folder.
+  - **Never crosses into another mounted filesystem.**
+    - Deletion stops at a device boundary.
+    - It refuses when `/proc/self/mountinfo` lists a mount point below the path, or when that table can't be read.
+    - Printed commands use `find -xdev` and `rm --one-file-system`.
+  - **Symlink-race safe.**
+    - Symlinks are unlinked, never followed.
+    - In-app removal walks with directory handles (`remove_dir_all`), and root deletions walk down from a root-owned top with `find`.
+    - So a folder swapped for a symlink between analysis and cleanup can't redirect the delete.
+  - **Re-checked at run time.** Leftover kernel modules are re-checked against dpkg and `/boot` in the same root step that deletes them.
+- **Long cleanups work.** Scripts are fed to the shell on stdin, so thousands of files never hit the 128 KiB argument limit.
 - **Exact paths.** Folder names that aren't valid UTF-8 are acted on by their exact bytes. A shell command is never built from a lossy name.
 
 ## Accuracy & testing
@@ -137,25 +199,32 @@ Sizes are real disk usage (`st_blocks × 512`, what `du` reports). Hard links ar
 
 | Suite | What it proves | Result |
 |---|---|---|
-| `cargo test` (103 tests) | measuring rules (sparse files, hard links, symlinks, unreadable dirs, small-file folding), kernel/snap/log/Docker decisions from captured real-world inputs, removal guards incl. mount and symlink boundaries, and shell safety: generated commands run against 16 hostile file names (`$(…)`, backticks, quotes, newlines, leading `-`, globs, unicode) with no injection; every new rule against fixtures (running apps, missing tools, hard-linked stores, stale locks, env overrides) | ✅ 103 / 103 |
-| [`tests/blackbox/run_blackbox_tests.py`](tests/blackbox/run_blackbox_tests.py) | an independent black-box run of the CLI against GNU `du`: sizes, detection with false-positive traps, command quoting via `shlex`, commands executed on fixtures, robustness, performance | ✅ 178 / 178 |
-| [`tests/system/validate_ubuntu_rules.py`](tests/system/validate_ubuntu_rules.py) | read-only ground truth on a live Ubuntu 22.04 machine. For each rule it recomputes the answer independently (`apt-get -s`, `dpkg-query`, `snap list --all`, a replay of journald's vacuum, `find -links 1`, `du`, `pgrep`) and compares paths and bytes. It also lists large `~/.cache` folders that no rule covers | ✅ 39 / 39 rules exact |
+| `cargo test` (111 tests) | Checks the measuring rules: sparse files, hard links, symlinks, unreadable dirs and small-file folding. Checks every rule's decisions against captured real-world inputs and fixtures: running apps, stale locks, missing tools, hard-linked stores, kernels still being installed, reverted snaps and implausible env overrides. Checks the removal guards: mounts, symlink races and ancestors of home. Checks shell safety: commands are generated for 16 hostile file names (`$(…)`, backticks, quotes, newlines, a leading `-`, globs, unicode), none of which gets injected | ✅ 111 / 111 |
+| [`tests/blackbox/`](tests/blackbox/run_blackbox_tests.py) | An independent black-box run of the CLI against GNU `du`. Covers sizes, detection with false-positive traps, command quoting via `shlex`, commands executed on fixtures, robustness and performance | ✅ 178 / 178 |
+| [`tests/safety/user/`](tests/safety/user/run_user_safety.py) | Every user-level cleanup **really executed** in a sandboxed home, against real programs: headless Chrome, Firefox, Electron 33, pip, uv, npm/npx, pnpm, cargo, go, `gio trash`, and tracker3 in Docker. Before and after it checks that the program still works, that cookies, localStorage, IndexedDB, bookmarks, venvs and projects survive, that **nothing outside the listed paths changed** (a sha256 manifest), and that the bytes reported match the bytes freed. It also runs traps: symlink escapes, hostile names, bind mounts | ✅ 328 / 328 |
+| [`tests/safety/audit/`](tests/safety/audit/run_audit_repros.py) | Reproducers from an adversarial safety audit, run in fixtures and disposable `ubuntu:22.04` containers. Cases include a kernel being installed during cleanup, MySQL binlogs in `/var/log`, a symlink swapped in after analysis, `apt autoremove` purging config, an app's bundled `node_modules`, `PIP_CACHE_DIR=$HOME`, a reverted snap and a Docker context mismatch | ✅ 14 / 14 fixed |
+| [`tests/functional/`](tests/functional/run_functional_tests.py) | CLI flags and exit codes, JSON schema, the scanner against `du` on hostile trees (100k files, 1,500-level nesting, FIFOs, sparse files, bind mounts), and the terminal UI driven through a pty: navigation, marking, cancel, real Trash/permanent deletion, guards, resizing and colour modes | ✅ 263 / 264 (one known limit: trees deeper than PATH_MAX, ~370 levels, are reported as unreadable) |
+| [`tests/system/`](tests/system/validate_ubuntu_rules.py) | Read-only ground truth on a live Ubuntu 22.04 machine. For each rule it recomputes the answer independently (`apt-get -s`, `dpkg-query`, `snap list --all`, a replay of journald's vacuum, `find -links 1`, `du`, `pgrep`) and compares paths and bytes. It also lists large `~/.cache` folders that no rule covers | ✅ 39 / 39 rules exact |
 
 A full scan of a real 66 GB home folder matches `du -sx` **to the byte**. On an i7-1165G7 with NVMe it takes about **0.6 s** and **76 MB** of RAM. The whole root filesystem (about 1 M files) takes about 1–2 s.
 
 ```sh
 cargo test
-cargo build --release && python3 tests/blackbox/run_blackbox_tests.py   # add --skip-perf / --skip-home to shorten
-python3 tests/system/validate_ubuntu_rules.py                            # live system; needs `sudo -n` for read-only checks
+cargo build --release
+python3 tests/blackbox/run_blackbox_tests.py              # add --skip-perf / --skip-home to shorten
+python3 tests/functional/run_functional_tests.py --binary target/release/linux_disk_prune --workdir /tmp/ldp-func
+python3 tests/safety/user/run_user_safety.py --bin target/release/linux_disk_prune --work /tmp/ldp-safety
+LDP_BIN=target/release/linux_disk_prune python3 tests/safety/audit/run_audit_repros.py
+python3 tests/system/validate_ubuntu_rules.py             # live system; needs `sudo -n` for read-only checks
 ```
 
 ## Install
 
 ### ⬇️ Download the .deb (Ubuntu 22.04 LTS or newer, x86_64)
 
-[![Download .deb](https://img.shields.io/badge/download-linux--disk--prune__0.2.0__amd64.deb-00f2de?style=for-the-badge&logo=ubuntu&logoColor=white)](https://github.com/saad-git-007/linux_disk_prune/releases/latest/download/linux-disk-prune_0.2.0_amd64.deb)
+[![Download .deb](https://img.shields.io/badge/download-linux--disk--prune__0.3.0__amd64.deb-00f2de?style=for-the-badge&logo=ubuntu&logoColor=white)](https://github.com/saad-git-007/linux_disk_prune/releases/latest/download/linux-disk-prune_0.3.0_amd64.deb)
 
-**[linux-disk-prune_0.2.0_amd64.deb](https://github.com/saad-git-007/linux_disk_prune/releases/latest/download/linux-disk-prune_0.2.0_amd64.deb)** (about 5.5 MB) · [SHA-256](https://github.com/saad-git-007/linux_disk_prune/releases/latest/download/linux-disk-prune_0.2.0_amd64.deb.sha256) · [all releases](https://github.com/saad-git-007/linux_disk_prune/releases)
+**[linux-disk-prune_0.3.0_amd64.deb](https://github.com/saad-git-007/linux_disk_prune/releases/latest/download/linux-disk-prune_0.3.0_amd64.deb)** (about 5.6 MB) · [SHA-256](https://github.com/saad-git-007/linux_disk_prune/releases/latest/download/linux-disk-prune_0.3.0_amd64.deb.sha256) · [all releases](https://github.com/saad-git-007/linux_disk_prune/releases)
 
 Tested on Ubuntu 22.04. The binary only needs glibc ≥ 2.35, so it also installs on newer Ubuntu releases; the cleanup rules are written for 22.04.
 
@@ -163,14 +232,14 @@ Tested on Ubuntu 22.04. The binary only needs glibc ≥ 2.35, so it also install
 
 ```sh
 # 1. Download the package and its checksum
-wget https://github.com/saad-git-007/linux_disk_prune/releases/latest/download/linux-disk-prune_0.2.0_amd64.deb
-wget https://github.com/saad-git-007/linux_disk_prune/releases/latest/download/linux-disk-prune_0.2.0_amd64.deb.sha256
+wget https://github.com/saad-git-007/linux_disk_prune/releases/latest/download/linux-disk-prune_0.3.0_amd64.deb
+wget https://github.com/saad-git-007/linux_disk_prune/releases/latest/download/linux-disk-prune_0.3.0_amd64.deb.sha256
 
 # 2. (Recommended) verify the download
-sha256sum -c linux-disk-prune_0.2.0_amd64.deb.sha256
+sha256sum -c linux-disk-prune_0.3.0_amd64.deb.sha256
 
 # 3. Install. apt pulls in any missing dependencies automatically
-sudo apt install ./linux-disk-prune_0.2.0_amd64.deb
+sudo apt install ./linux-disk-prune_0.3.0_amd64.deb
 ```
 
 Then open **Disk Prune** from the app launcher (Activities → search "Disk Prune"), or run `linux_disk_prune` in a terminal. Right-click the launcher icon for **Scan the whole disk**, or right-click a folder in Files → **Open With → Disk Prune**.
@@ -199,7 +268,7 @@ It **depends on** standard desktop libraries that every Ubuntu desktop already h
 
 ```sh
 ./packaging/build-deb.sh                   # needs cargo + dpkg-deb
-sudo apt install ./dist/linux-disk-prune_0.2.0_amd64.deb
+sudo apt install ./dist/linux-disk-prune_0.3.0_amd64.deb
 ```
 
 `cargo deb` works too (see `[package.metadata.deb]`).
@@ -234,7 +303,7 @@ linux_disk_prune --json           # machine-readable report
 | `--tui`, `--color auto\|truecolor\|256` | terminal UI and its colour depth |
 | `--no-exec` | disable cleanup execution |
 
-**Keys:** `1` `2` `3` `4` switch views · click / double-click / scroll to select and zoom · arrows move between tiles · `Enter` / `Backspace` zoom in / out · `Space` or `X` marks · `[` `]` sets depth / rings · `C` opens Review & clean · `F5` rescans · right-click for Zoom, Mark, Open in Files, Copy path.
+**Keys (desktop app):** `1` `2` `3` `4` `5` switch views (5 = Large items) · click / double-click / scroll to select and zoom · arrows move between tiles · `Enter` / `Backspace` zoom in / out · `Space` or `X` marks · `[` `]` sets depth / rings · `C` opens Review & clean · `F5` rescans · right-click for Zoom, Mark, Open in Files, Open file, Copy path. In the Prune list, right-click a suggestion to open its files or copy its command. **Terminal UI:** the footer lists its keys (`Space`/`x` mark, `c` review, `R` rescan, `q` quit).
 
 ### GPU rendering
 
@@ -254,10 +323,12 @@ src/rules/extra.rs     browser/Electron/IDE/tool caches, snapd orphans, autoremo
 src/sysdirs.rs         runtime discovery of system paths (apt-config, snap, flatpak, journald, fontconfig)
 src/classify.rs        kind-of-data classification for colours
 src/cleanup.rs         guarded removal (mount- and symlink-aware), Trash / permanent
-src/gui/               eframe/egui desktop app: treemap, sunburst, views, theme, pkexec runner
+src/gui/               eframe/egui desktop app: treemap, sunburst, large items, views, theme, pkexec runner
 src/ui.rs              ratatui terminal UI
 tests/blackbox/        independent black-box validation suite (Python stdlib)
 tests/system/          read-only ground-truth validator for a live Ubuntu machine
+tests/functional/      CLI / TUI (pty) / scanner functional suite
+tests/safety/          user-cache cleanups run against real apps; adversarial audit reproducers
 packaging/             .deb build script, desktop entry, icon
 ```
 

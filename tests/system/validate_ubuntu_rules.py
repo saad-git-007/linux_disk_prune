@@ -427,7 +427,17 @@ def check_journal(rep):
 
 # ------------------------------------------------------------------ 5. Rotated logs
 
-STRICT = re.compile(r"(\.gz|\.xz|\.\d+)$")
+STRICT = re.compile(r"(\.gz|\.xz|\.\d{1,3})$")
+DATED = re.compile(r"\.log\.20\d\d(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])(\d{6})?$")
+
+
+def rotated_name(n):
+    """logrotate names: .gz/.xz, .N (1-3 digits, stem not ending in a number),
+    or a date-stamped .log.YYYYMMDD[hhmmss]."""
+    if n.endswith((".gz", ".xz")) or DATED.search(n):
+        return True
+    m = re.search(r"^(.*)\.(\d{1,3})$", n)
+    return bool(m) and not re.search(r"(^|\.)\d+$", m.group(1))
 EXTENDED = re.compile(r"(\.bz2|\.zst|\.lz4|\.old|\.Z|[-_.]\d{8}(\.\w+)?)$")
 
 
@@ -440,7 +450,8 @@ def check_rotated(rep):
         p, b, t = l.split("\t")
         allf[p] = (int(b) * 512, float(t))
     exp = {p: v for p, v in allf.items()
-           if STRICT.search(os.path.basename(p)) and p != "/var/log/apt/eipp.log.xz"}
+           if rotated_name(os.path.basename(p)) and p != "/var/log/apt/eipp.log.xz"
+           and not any(x.endswith(".index") for x in os.listdir(os.path.dirname(p)))}
     ext = {p: v for p, v in allf.items() if p not in exp and EXTENDED.search(os.path.basename(p))}
     f = rep.get(R)
     rp = set(f["paths"]) if f else set()
@@ -537,7 +548,7 @@ def check_docker(rep):
 
 CACHES = {
     "thumbnails": [".cache/thumbnails"],
-    "pip-cache": [".cache/pip"],
+    "pip-cache": [".cache/pip/http", ".cache/pip/http-v2", ".cache/pip/wheels", ".cache/pip/selfcheck"],
     "cargo-registry": [".cargo/registry/cache", ".cargo/registry/src"],
     "cargo-git": [".cargo/git/checkouts"],
     "npm-cache": [".npm/_cacache"],
@@ -600,10 +611,16 @@ def walk_artifacts(root, skip_hidden=True, skip=(), hidden_log=None):
             if e.name == "target" and ("Cargo.toml" in names or os.path.exists(os.path.join(p, "CACHEDIR.TAG"))):
                 rust.append(p)
             elif e.name == "node_modules":
-                if "package.json" in names and not in_nm:
+                # Restorable project installs only: package.json + a lockfile (or the
+                # package manager's install record), never inside an app bundle; and
+                # never descend into any node_modules.
+                locks = {"package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "bun.lock"}
+                marks = (".package-lock.json", ".yarn-integrity", ".modules.yaml", ".yarn-state.yml")
+                restorable = (names & locks) or any(os.path.isfile(os.path.join(p, m)) for m in marks)
+                bundle = "/resources/app" in d or d.endswith("/resources") or any(
+                    x.endswith(".asar") for dd in (d, os.path.dirname(d)) for x in (os.listdir(dd) if os.path.isdir(dd) else []))
+                if "package.json" in names and not in_nm and restorable and not bundle:
                     node.append(p)
-                else:
-                    stack.append((p, True))
             elif e.name == "__pycache__":
                 pyc.append(p)
             else:

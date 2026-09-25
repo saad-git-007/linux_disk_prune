@@ -3,11 +3,11 @@
 //! Every check here is read-only: it inspects metadata and produces findings
 //! that carry the exact command needed to reclaim the space.
 
-use super::{sudo_rm_files, Action, CheckOutput, Finding, Risk};
+use super::{sudo_delete_files, Action, CheckOutput, Finding, Risk};
 use crate::scanner::{self, marker, NodeKind, Progress, ScanOptions, Tree};
 use crate::util::{fmt_size, running_kernel, shq, tilde};
 use rayon::prelude::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::fs::MetadataExt;
@@ -112,12 +112,18 @@ fn cache_dir_finding(
     risk: Risk,
     detail: &str,
 ) -> Option<Finding> {
-    let existing: Vec<PathBuf> = dirs.iter().filter(|d| d.is_dir()).cloned().collect();
+    // Real directories only: a symlinked cache folder is left alone.
+    let existing: Vec<PathBuf> = dirs.iter().filter(|d| fs::symlink_metadata(d).is_ok_and(|m| m.is_dir())).cloned().collect();
     // The directories themselves are kept (only their contents go), so their
     // own blocks are not reclaimable.
     let bytes: u64 = existing
         .iter()
         .map(|d| {
+            // Cargo's git checkouts hard-link pack files from git/db: only
+            // data nothing else links to comes back.
+            if id == "cargo-git" {
+                return super::extra::unique_bytes(d);
+            }
             let own = fs::symlink_metadata(d).map_or(0, |m| file_bytes(&m));
             scanner::du(d).0.saturating_sub(own)
         })
@@ -231,13 +237,73 @@ pub(super) fn apt_simulate_purge(pkgs: &[String]) -> Option<String> {
     o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
-/// Packages an `apt-get -s` run would remove (its `Remv` / `Purg` lines).
+/// Output of `apt-get -s remove <pkgs>` (what `apt autoremove` does), or None.
+pub(super) fn apt_simulate_remove(pkgs: &[String]) -> Option<String> {
+    let o = Command::new("apt-get")
+        .arg("-s")
+        .arg("remove")
+        .args(pkgs)
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+/// Packages an `apt-get -s` run would change: its `Remv` / `Purg` lines, plus
+/// any `Inst` line as "<pkg> (install)" — removing something should never
+/// pull in a replacement unnoticed.
 pub(super) fn apt_sim_removals(sim: &str) -> Vec<String> {
+    let name = |rest: &str| rest.split_whitespace().next().map(|p| p.split(':').next().unwrap_or(p).to_string());
     sim.lines()
-        .filter_map(|l| l.strip_prefix("Remv ").or_else(|| l.strip_prefix("Purg ")))
-        .filter_map(|rest| rest.split_whitespace().next())
-        .map(|p| p.split(':').next().unwrap_or(p).to_string())
+        .filter_map(|l| {
+            if let Some(rest) = l.strip_prefix("Remv ").or_else(|| l.strip_prefix("Purg ")) {
+                name(rest)
+            } else {
+                l.strip_prefix("Inst ").and_then(name).map(|n| format!("{n} (install)"))
+            }
+        })
         .collect()
+}
+
+/// dpkg state of every package: name → last word of `Status:` (`installed`,
+/// `unpacked`, `half-configured`, `config-files`, …).
+fn package_states(status: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for stanza in status.split("\n\n") {
+        let mut name = None;
+        let mut state = None;
+        for line in stanza.lines() {
+            if let Some(n) = line.strip_prefix("Package: ") {
+                name = Some(n.trim().to_string());
+            } else if let Some(s) = line.strip_prefix("Status: ") {
+                state = s.split_whitespace().last().map(str::to_string);
+            }
+        }
+        if let (Some(n), Some(st)) = (name, state) {
+            out.insert(n, st);
+        }
+    }
+    out
+}
+
+/// Does dpkg know kernel `ver` in any state other than removed? True while a
+/// kernel is being installed (e.g. `unpacked` during an unattended upgrade).
+fn kernel_version_live(states: &HashMap<String, String>, ver: &str) -> bool {
+    let suffix = format!("-{ver}");
+    states
+        .iter()
+        .any(|(p, st)| p.starts_with("linux-") && p.ends_with(&suffix) && st != "config-files" && st != "not-installed")
+}
+
+/// Root command removing a leftover module dir, re-checking right before
+/// deleting that no kernel of that version appeared in the meantime.
+fn leftover_rm_command(ver: &str, dir: &Path) -> String {
+    format!(
+        "sudo sh -c 'if [ -e \"/boot/vmlinuz-$1\" ] || dpkg-query -W -f=\"\\${{Status}}\\n\" \"linux-*-$1\" 2>/dev/null | grep -Evq \"(config-files|not-installed)$\"; then echo \"kept $2: kernel $1 is installed now\"; else rm -rf --one-file-system -- \"$2\"; fi' _ {} {}",
+        shq(ver),
+        shq(&dir.to_string_lossy())
+    )
 }
 
 /// Numeric ABI part of a kernel release: `6.8.0-100-generic` -> `6.8.0-100`,
@@ -277,14 +343,18 @@ fn kernel_pkg_matches(pkg: &str, ver: &str, base: &str, base_shared: bool) -> bo
     }
 }
 
-/// Kernel releases with an installed `linux-image-<release>` package.
+/// Kernel releases with an installed `linux-image-<release>` package (signed
+/// or unsigned, once each; debug-symbol packages are not kernels).
 fn installed_kernel_images(packages: &[String]) -> Vec<String> {
-    packages
+    let mut v: Vec<String> = packages
         .iter()
         .filter_map(|p| p.strip_prefix("linux-image-unsigned-").or_else(|| p.strip_prefix("linux-image-")))
-        .filter(|v| v.starts_with(|c: char| c.is_ascii_digit()))
+        .filter(|v| v.starts_with(|c: char| c.is_ascii_digit()) && !v.ends_with("-dbgsym"))
         .map(String::from)
-        .collect()
+        .collect();
+    v.sort();
+    v.dedup();
+    v
 }
 
 /// UTF-8 names in `dir` (others can not be a kernel release we can act on).
@@ -302,6 +372,7 @@ fn kernel_findings(
     simulate: &dyn Fn(&[String]) -> Option<String>,
 ) -> CheckOutput {
     let packages = installed_packages(dpkg_status);
+    let states = package_states(dpkg_status);
     let mut images = installed_kernel_images(&packages);
     if images.is_empty() || running.is_empty() {
         // Without the package database nothing can be judged safely.
@@ -394,7 +465,7 @@ fn kernel_findings(
                     if !extra.is_empty() {
                         manual(format!(
                             "Kernel {ver} is not in use, but purging its packages would also \
-                             remove {} (e.g. the kernel metapackage that keeps future kernel \
+                             change {} (e.g. remove the kernel metapackage that keeps future kernel \
                              updates coming). Not done automatically; review with:\n  \
                              apt-get -s purge {}",
                             extra.join(", "),
@@ -420,8 +491,15 @@ fn kernel_findings(
                     }
                 }
             }
-        } else if paths.iter().all(|p| p.starts_with(roots.modules)) {
+        } else if paths.iter().all(|p| p.starts_with(roots.modules))
+            && !kernel_version_live(&states, ver)
+            && version_key(ver) < version_key(&newest)
+        {
             leftovers.extend(paths.into_iter().map(|p| (p, bytes)));
+            continue;
+        } else if paths.iter().all(|p| p.starts_with(roots.modules)) {
+            // Being installed right now, or newer than every installed image
+            // (e.g. a kernel installed outside dpkg): never touch it.
             continue;
         } else {
             manual(format!(
@@ -454,7 +532,11 @@ fn kernel_findings(
                 rc.iter().map(|p| shq(p)).collect::<Vec<_>>().join(" ")
             ));
         }
-        command.push_str(&sudo_rm_rf(&paths));
+        let per_dir: Vec<String> = paths
+            .iter()
+            .map(|p| leftover_rm_command(p.file_name().and_then(|n| n.to_str()).unwrap_or_default(), p))
+            .collect();
+        command.push_str(&per_dir.join("; "));
         out.findings.push(Finding {
             id: "kernel-leftovers".into(),
             category: "Kernels".into(),
@@ -511,10 +593,6 @@ fn rc_kernel_packages(dpkg_status: &str, module_dirs: &[PathBuf]) -> Vec<String>
     out
 }
 
-fn sudo_rm_rf(paths: &[PathBuf]) -> String {
-    let list: Vec<String> = paths.iter().map(|p| shq(&p.to_string_lossy())).collect();
-    format!("sudo rm -rf -- {}", list.join(" "))
-}
 
 /// Keep only paths a shell command can name exactly (valid UTF-8).
 fn utf8_only(files: Vec<(PathBuf, u64)>) -> Vec<(PathBuf, u64)> {
@@ -587,10 +665,21 @@ fn snap_findings_ext(snaps_dir: &Path, snap_root: &Path, snap_list: &str, data_r
     let mut paths = Vec::new();
     let mut names: Vec<String> = Vec::new();
     let mut bytes = 0;
+    let mut reverted: Vec<(String, String, String)> = Vec::new();
+    let num = |r: &str| r.parse::<u64>().ok();
     for (name, rev) in disabled_snap_revisions(snap_list) {
         if let Ok(cur) = fs::read_link(snap_root.join(&name).join("current")) {
             if cur.as_os_str() == rev.as_str() {
                 continue; // never the active revision
+            }
+            // Newer than the active one: the user ran `snap revert`, and this
+            // revision's data dir holds their most recent data.
+            let cur = cur.to_string_lossy().into_owned();
+            if let (Some(r), Some(c)) = (num(&rev), num(&cur)) {
+                if r > c {
+                    reverted.push((name, rev, cur));
+                    continue;
+                }
             }
         }
         let file = snaps_dir.join(format!("{name}_{rev}.snap"));
@@ -619,10 +708,34 @@ fn snap_findings_ext(snaps_dir: &Path, snap_root: &Path, snap_list: &str, data_r
             names.push(name);
         }
     }
-    if cmds.is_empty() {
-        return CheckOutput::default();
+    let mut out = CheckOutput::default();
+    if !reverted.is_empty() {
+        let list: Vec<String> = reverted.iter().map(|(n, r, c)| format!("{n} revision {r} (active: {c})")).collect();
+        let bytes: u64 = reverted
+            .iter()
+            .map(|(n, r, _)| fs::metadata(snaps_dir.join(format!("{n}_{r}.snap"))).map_or(0, |m| file_bytes(&m)))
+            .sum();
+        out.findings.push(Finding {
+            id: "snap-reverted".into(),
+            category: "Snap".into(),
+            title: format!("Snap revisions newer than the active one ({})", reverted.len()),
+            risk: Risk::Caution,
+            bytes,
+            detail: format!(
+                "{}. These snaps were reverted to an older revision, so the disabled newer \
+                 revision's data folder holds your most recent data. Only remove one once you \
+                 are sure you don't want to go back to it: sudo snap remove <name> --revision=<rev>",
+                list.join(", ")
+            ),
+            paths: Vec::new(),
+            action: Action::Manual,
+            needs_root: true,
+        });
     }
-    CheckOutput::one(Finding {
+    if cmds.is_empty() {
+        return out;
+    }
+    out.findings.push(Finding {
         id: "snap-revisions".into(),
         category: "Snap".into(),
         title: format!("Disabled snap revisions ({} in {})", cmds.len(), names.join(", ")),
@@ -645,7 +758,8 @@ fn snap_findings_ext(snaps_dir: &Path, snap_root: &Path, snap_list: &str, data_r
         // Independent removals: one failing must not skip the others.
         action: Action::Shell { command: cmds.join("; ") },
         needs_root: true,
-    })
+    });
+    out
 }
 
 /// 4. Systemd journal above the retention target.
@@ -715,10 +829,12 @@ fn journal_findings(dir: &Path, keep: u64) -> CheckOutput {
         return CheckOutput::default();
     }
     let keep_mb = keep >> 20;
+    // journalctl takes K/M/G: say exactly the keep size that was measured.
+    let keep_arg = if keep % (1 << 20) == 0 { format!("{keep_mb}M") } else { format!("{}K", keep >> 10) };
     CheckOutput::one(Finding {
         id: "journal".into(),
         category: "Logs".into(),
-        title: format!("systemd journal is {} (keep {keep_mb} MiB)", fmt_size(size)),
+        title: format!("systemd journal is {} (keep {})", fmt_size(size), fmt_size(keep)),
         risk: Risk::Moderate,
         bytes: reclaim,
         detail: format!(
@@ -727,19 +843,32 @@ fn journal_findings(dir: &Path, keep: u64) -> CheckOutput {
              SystemMaxUse={keep_mb}M in /etc/systemd/journald.conf."
         ),
         paths: vec![dir.to_path_buf()],
-        action: Action::Shell { command: format!("sudo journalctl --vacuum-size={keep_mb}M") },
+        // --directory: vacuum exactly the store that was measured.
+        action: Action::Shell { command: format!("sudo journalctl --directory={} --vacuum-size={keep_arg}", shq(&dir.to_string_lossy())) },
         needs_root: true,
     })
 }
 
+/// logrotate's names: `x.gz` / `x.xz`, or `x.N` with a
+/// small rotation number. `mysql-bin.000002` (a live MySQL binlog) and
+/// `10.0.0.5` (rsyslog's per-host file) are not rotations.
 fn is_rotated_log(name: &str) -> bool {
     if name.ends_with(".gz") || name.ends_with(".xz") {
         return true;
     }
-    match name.rsplit_once('.') {
-        Some((_, ext)) => !ext.is_empty() && ext.chars().all(|c| c.is_ascii_digit()),
-        None => false,
+    let Some((stem, ext)) = name.rsplit_once('.') else { return false };
+    if !ext.chars().all(|c| c.is_ascii_digit()) {
+        return false;
     }
+    // `x.log.20260914085904`: a date-stamped rotation (YYYYMMDD[hhmmss]).
+    let dated = stem.ends_with(".log")
+        && (ext.len() == 8 || ext.len() == 14)
+        && ext[..2].eq("20")
+        && (1..=12).contains(&ext[4..6].parse::<u32>().unwrap_or(0))
+        && (1..=31).contains(&ext[6..8].parse::<u32>().unwrap_or(0));
+    let small_number = (1..=3).contains(&ext.len());
+    let stem_last = stem.rsplit('.').next().unwrap_or("");
+    dated || (small_number && !(!stem_last.is_empty() && stem_last.chars().all(|c| c.is_ascii_digit())))
 }
 
 /// Old rotated logs (`syslog.1`, `kern.log.2.gz`, ...).
@@ -753,7 +882,13 @@ fn check_rotated_logs(_: &RuleContext) -> CheckOutput {
 fn rotated_log_files(root: &Path) -> Vec<(PathBuf, u64)> {
     fn walk(dir: &Path, skip: &[PathBuf], acc: &mut Vec<(PathBuf, u64)>) {
         let Ok(rd) = fs::read_dir(dir) else { return };
-        for e in rd.flatten() {
+        let entries: Vec<fs::DirEntry> = rd.flatten().collect();
+        // A `*.index` file marks numbered files that belong together (MySQL
+        // binlogs): those are data, never rotated logs.
+        if entries.iter().any(|e| e.file_name().to_string_lossy().ends_with(".index")) {
+            return;
+        }
+        for e in entries {
             let Ok(md) = e.metadata() else { continue };
             let p = e.path();
             if skip.contains(&p) {
@@ -791,7 +926,7 @@ fn rotated_log_findings(root: &Path) -> CheckOutput {
         detail: "Compressed or numbered log archives left behind by logrotate. Current \
                  logs are untouched; you lose older history only."
             .into(),
-        action: Action::Shell { command: sudo_rm_files(&paths) },
+        action: Action::Shell { command: sudo_delete_files(root, &paths) },
         paths,
         needs_root: true,
     })
@@ -802,9 +937,15 @@ fn check_crash(_: &RuleContext) -> CheckOutput {
     crash_findings(&crate::sysdirs::get().crash)
 }
 
-/// Crash-report check against an injectable directory (`/var/crash`).
+/// Crash-report check against an injectable directory (`/var/crash`). Only
+/// apport's own files count, and only in a real directory (not a symlink).
 fn crash_findings(dir: &Path) -> CheckOutput {
-    let files = utf8_only(list_files(dir, |n| !n.starts_with('.')));
+    if !fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir()) {
+        return CheckOutput::default();
+    }
+    let files = utf8_only(list_files(dir, |n| {
+        !n.starts_with('.') && [".crash", ".upload", ".uploaded"].iter().any(|e| n.ends_with(e))
+    }));
     let bytes: u64 = files.iter().map(|f| f.1).sum();
     if files.is_empty() {
         return CheckOutput::default();
@@ -819,7 +960,7 @@ fn crash_findings(dir: &Path) -> CheckOutput {
         detail: "Core dumps and reports collected by apport. Once reported (or if you do \
                  not plan to), they serve no purpose."
             .into(),
-        action: Action::Shell { command: sudo_rm_files(&paths) },
+        action: Action::Shell { command: sudo_delete_files(dir, &paths) },
         paths,
         needs_root: true,
     })
@@ -842,7 +983,9 @@ fn check_user_caches(ctx: &RuleContext) -> CheckOutput {
             "pip-cache",
             "Python",
             "pip download cache",
-            vec![d.pip_cache(ctx.is_root)],
+            // pip's own sub-folders only (what `pip cache purge` clears), so a
+            // PIP_CACHE_DIR shared with other data is never emptied wholesale.
+            ["http", "http-v2", "wheels", "selfcheck"].iter().map(|s| d.pip_cache(ctx.is_root).join(s)).collect(),
             Risk::Safe,
             "Wheels and HTTP responses cached by pip. Equivalent: pip cache purge",
         ),
@@ -995,7 +1138,8 @@ fn check_docker(_: &RuleContext) -> CheckOutput {
                      usually left over from rebuilding images."
                 .into(),
             paths: Vec::new(),
-            action: Action::Shell { command: "docker image prune -f".into() },
+            // -H: the daemon that was measured, not the CLI's current context.
+            action: Action::Shell { command: format!("docker -H {} image prune -f", shq(&format!("unix://{}", sock.display()))) },
             needs_root: false,
         });
     }
@@ -1011,7 +1155,8 @@ fn check_docker(_: &RuleContext) -> CheckOutput {
                      slower until the cache is warm again."
                 .into(),
             paths: Vec::new(),
-            action: Action::Shell { command: "docker builder prune -f".into() },
+            // -H: the daemon that was measured, not the CLI's current context.
+            action: Action::Shell { command: format!("docker -H {} builder prune -f", shq(&format!("unix://{}", sock.display()))) },
             needs_root: false,
         });
     }
@@ -1019,6 +1164,27 @@ fn check_docker(_: &RuleContext) -> CheckOutput {
 }
 
 // ---------------------------------------------------------------- projects
+
+/// A `node_modules` a package manager can restore: the project has a lockfile
+/// (or the folder carries the package manager's install metadata), and it is
+/// not the bundled code of an installed app (VS Code, Discord, Obsidian …
+/// ship `resources/app/node_modules`, which nothing can reinstall).
+fn is_restorable_node_modules(nm: &Path) -> bool {
+    let Some(project) = nm.parent() else { return false };
+    let s = project.to_string_lossy();
+    if s.contains("/resources/app") || s.ends_with("/resources") {
+        return false;
+    }
+    let asar_nearby = |d: &Path| {
+        fs::read_dir(d).is_ok_and(|rd| rd.flatten().any(|e| e.file_name().to_string_lossy().ends_with(".asar")))
+    };
+    if asar_nearby(project) || project.parent().is_some_and(asar_nearby) {
+        return false;
+    }
+    const LOCKS: &[&str] = &["package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "bun.lock"];
+    const INSTALLED: &[&str] = &[".package-lock.json", ".yarn-integrity", ".modules.yaml", ".yarn-state.yml"];
+    LOCKS.iter().any(|l| project.join(l).is_file()) || INSTALLED.iter().any(|m| nm.join(m).is_file())
+}
 
 /// Project build artifacts under the dev roots: Rust `target/`, `node_modules/`
 /// and `__pycache__/`. Reuses the main scan tree when it covers a dev root,
@@ -1065,7 +1231,10 @@ pub fn run_artifact_check(ctx: &RuleContext, tree: Option<&Tree>, opts: &ScanOpt
                 }
                 match child.name.as_str() {
                     "node_modules" if node.markers & marker::PACKAGE_JSON != 0 => {
-                        artifacts.push((Risk::Caution, "node", t.path_of(c), child.size));
+                        let nm = t.path_of(c);
+                        if is_restorable_node_modules(&nm) {
+                            artifacts.push((Risk::Caution, "node", nm, child.size));
+                        }
                     }
                     "target"
                         if node.markers & marker::CARGO_TOML != 0
@@ -1074,6 +1243,10 @@ pub fn run_artifact_check(ctx: &RuleContext, tree: Option<&Tree>, opts: &ScanOpt
                         artifacts.push((Risk::Caution, "rust", t.path_of(c), child.size));
                     }
                     "__pycache__" => pycache.push((t.path_of(c), child.size)),
+                    // Never look inside a node_modules that isn't a project's
+                    // (e.g. a global `npm -g --prefix` install): its nested
+                    // node_modules are installed software, not build output.
+                    "node_modules" => {}
                     _ => stack.push(c),
                 }
             }
@@ -1447,11 +1620,38 @@ mod tests {
         let vers = [g("100"), g("110"), g("120")];
         let refs: Vec<&str> = vers.iter().map(|s| s.as_str()).collect();
         // A newer, package-less leftover must not push 6.8.0-110 out of the kept set.
-        let d = kernel_tree(&refs, &[&g("200")]);
+        let d = kernel_tree(&refs, &[&g("200"), &g("050")]);
         let out = kernels(&d, &g("120"), &dpkg(&refs));
         assert_eq!(proposed(&out), [g("100")]);
+        // Only the older leftover: one newer than every installed image may be
+        // a kernel that is being (or was hand-) installed.
         let left = out.findings.iter().find(|f| f.id == "kernel-leftovers").unwrap();
-        assert_eq!(left.paths, [d.join(format!("modules/{}", g("200")))]);
+        assert_eq!(left.paths, [d.join(format!("modules/{}", g("050")))]);
+    }
+
+    #[test]
+    fn kernel_being_installed_is_never_a_leftover() {
+        // An unattended upgrade has unpacked 6.8.0-130's modules but not yet
+        // its image: /lib/modules/6.8.0-130 exists with no /boot files.
+        let vers = [g("100"), g("110"), g("120")];
+        let refs: Vec<&str> = vers.iter().map(|s| s.as_str()).collect();
+        let d = kernel_tree(&refs, &[&g("115"), &g("090")]);
+        let mut status = dpkg(&refs);
+        status.push_str(&format!("\nPackage: linux-modules-{}\nStatus: install ok unpacked\nArchitecture: amd64\n", g("115")));
+        let out = kernels(&d, &g("120"), &status);
+        let left = out.findings.iter().find(|f| f.id == "kernel-leftovers").unwrap();
+        assert_eq!(left.paths, [d.join(format!("modules/{}", g("090")))]);
+        // The command re-checks at run time before deleting.
+        assert!(shell_cmd(left).contains("dpkg-query -W") && shell_cmd(left).contains("--one-file-system"));
+    }
+
+    #[test]
+    fn debug_symbol_packages_are_not_kernels() {
+        let pk: Vec<String> = ["linux-image-6.8.0-120-generic", "linux-image-unsigned-6.8.0-130-generic-dbgsym", "linux-image-unsigned-6.8.0-120-generic"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(installed_kernel_images(&pk), [g("120")]);
     }
 
     #[test]
@@ -1482,7 +1682,7 @@ mod tests {
                    Purg linux-image-6.8.0-100-generic [6.8.0-100.100~22.04.1]\n\
                    Remv linux-generic:amd64 [6.8.0.100.100]\n\
                    Inst something-else [1.0]\nConf something-else (1.0 Ubuntu:22.04/jammy [amd64])\n";
-        assert_eq!(apt_sim_removals(sim), ["linux-image-6.8.0-100-generic", "linux-generic"]);
+        assert_eq!(apt_sim_removals(sim), ["linux-image-6.8.0-100-generic", "linux-generic", "something-else (install)"]);
         assert!(apt_sim_removals("").is_empty());
     }
 
@@ -1671,6 +1871,20 @@ broken row with too many columns here  1  disabled
     }
 
     #[test]
+    fn snap_revision_newer_than_active_is_only_a_manual_step() {
+        // blender was reverted to 7740; the disabled 7803 holds the newest data.
+        let d = snap_fixture();
+        let list = "Name Version Rev Tracking Publisher Notes\n\
+                    blender 4.2 7803 latest/stable blenderfdn disabled\n\
+                    code 1.92 165 latest/stable vscode disabled\n";
+        let out = snap_findings(&d.join("snaps"), &d.join("snap"), list);
+        let normal = out.findings.iter().find(|f| f.id == "snap-revisions").unwrap();
+        assert_eq!(shell_cmd(normal), "sudo snap remove code --revision=165");
+        let rev = out.findings.iter().find(|f| f.id == "snap-reverted").unwrap();
+        assert!(!rev.is_actionable() && rev.risk == Risk::Caution && rev.detail.contains("blender revision 7803"));
+    }
+
+    #[test]
     fn snap_without_list_output_proposes_nothing() {
         let d = snap_fixture();
         assert!(snap_findings(&d.join("snaps"), &d.join("snap"), "").findings.is_empty());
@@ -1748,7 +1962,7 @@ broken row with too many columns here  1  disabled
         // keep 4 MiB of 6: only the oldest archived file has to go (whole file).
         let f = &journal_findings(&dir, 4 << 20).findings[0];
         assert_eq!(f.bytes, o);
-        assert_eq!(shell_cmd(f), "sudo journalctl --vacuum-size=4M");
+        assert_eq!(shell_cmd(f), format!("sudo journalctl --directory={} --vacuum-size=4M", dir.display()));
         // keep 1 MiB: both archived files go, the active one never does.
         assert_eq!(journal_findings(&dir, 1 << 20).findings[0].bytes, o + n);
         // Already under the keep size: nothing.
@@ -1793,6 +2007,13 @@ broken row with too many columns here  1  disabled
         ("dpkg.log.1 ", false),
         ("space name.3", true),
         ("uni-ünï.4", true),
+        ("mysql-bin.000002", false), // live MySQL binlog
+        ("10.0.0.5", false),         // rsyslog per-host file
+        ("syslog.1234", false),
+        ("vncserver-x11.log.20260914085904", true),
+        ("xrdp.log.20260914", true),
+        ("app.log.99999999", false),
+        ("mysql-bin.20260914", false), // not a .log stem
     ];
 
     #[test]
@@ -1839,7 +2060,7 @@ broken row with too many columns here  1  disabled
         let f = &out.findings[0];
         assert_eq!(f.paths.iter().cloned().collect::<HashSet<_>>(), counted);
         assert_eq!(f.bytes, counted.iter().map(|p| alloc(p)).sum::<u64>());
-        assert!(shell_cmd(f).starts_with("sudo rm -f -- "));
+        assert!(shell_cmd(f).starts_with("sudo find "));
         let (ok, _) = sh(&format!("{SHIM}{}", shell_cmd(f)), &root);
         assert!(ok, "{}", shell_cmd(f));
         let deleted: HashSet<PathBuf> = all.iter().filter(|p| !p.exists()).cloned().collect();
@@ -1869,6 +2090,14 @@ broken row with too many columns here  1  disabled
         assert!(lock.exists() && d.join("crash/sub/inner.crash").exists());
         assert!(!pwned(&dir) && !pwned(d.path()));
         assert!(crash_findings(&d.join("empty-nope")).findings.is_empty());
+        // Only apport's files, and never through a symlinked directory.
+        let docs = d.dir("docs");
+        d.file("docs/thesis.pdf", 5000);
+        d.file("docs/notes.txt", 5000);
+        assert!(crash_findings(&docs).findings.is_empty());
+        d.file("real/x.crash", 5000);
+        symlink(d.join("real"), d.join("linked")).unwrap();
+        assert!(crash_findings(&d.join("linked")).findings.is_empty());
     }
 
     #[test]
@@ -1919,7 +2148,14 @@ broken row with too many columns here  1  disabled
         d.file("tagged/target/CACHEDIR.TAG", 43);
         d.file("tagged/target/release/app", big);
         d.file("web/package.json", 10);
+        d.file("web/package-lock.json", 10);
         d.file("web/node_modules/dep/index.js", big);
+        // No lockfile: an installed app's bundled code, not restorable.
+        d.file("apps/VSCode/resources/app/package.json", 10);
+        d.file("apps/VSCode/resources/app/package-lock.json", 10);
+        d.file("apps/VSCode/resources/app/node_modules/x/index.js", big);
+        d.file("nolock/package.json", 10);
+        d.file("nolock/node_modules/y/index.js", big);
         d.file("web/node_modules/dep/Cargo.toml", 10);
         d.file("web/node_modules/dep/target/x", big); // inside node_modules: not separate
         d.file("web/node_modules/dep/__pycache__/x.pyc", 10);
@@ -2044,7 +2280,7 @@ broken row with too many columns here  1  disabled
         let out = check_user_caches(&ctx_for(h, &[]));
         let expect: Vec<(&str, Risk, Vec<&str>)> = vec![
             ("thumbnails", Risk::Safe, vec![".cache/thumbnails"]),
-            ("pip-cache", Risk::Safe, vec![".cache/pip"]),
+            ("pip-cache", Risk::Safe, vec![".cache/pip/http"]),
             ("cargo-registry", Risk::Moderate, vec![".cargo/registry/cache", ".cargo/registry/src"]),
             ("cargo-git", Risk::Safe, vec![".cargo/git/checkouts"]),
             ("npm-cache", Risk::Safe, vec![".npm/_cacache"]),

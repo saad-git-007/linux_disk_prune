@@ -25,7 +25,29 @@ pub fn parse_size(s: &str) -> Result<u64, String> {
         "T" => 1 << 40,
         _ => return Err(format!("unknown size unit in {s:?} (use K, M, G or T)")),
     };
-    Ok((n * mult as f64) as u64)
+    let bytes = n * mult as f64;
+    if !bytes.is_finite() || bytes > u64::MAX as f64 {
+        return Err(format!("size too large: {s}"));
+    }
+    Ok(bytes as u64)
+}
+
+/// Remove ANSI colour sequences (`ESC [ … m`).
+pub fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c == '\x1b' && it.peek() == Some(&'[') {
+            for d in it.by_ref() {
+                if d.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Quote a string for POSIX `sh` if needed.
