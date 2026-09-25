@@ -17,6 +17,7 @@ install -Dm755 "target/release/$BIN" "$STAGE/usr/bin/$BIN"
 ln -s "$BIN" "$STAGE/usr/bin/$PKG"                      # both names work
 install -Dm644 README.md "$STAGE/usr/share/doc/$PKG/README.md"
 install -Dm644 LICENSE   "$STAGE/usr/share/doc/$PKG/copyright"
+install -Dm644 NOTICE    "$STAGE/usr/share/doc/$PKG/NOTICE"
 install -Dm644 packaging/linux-disk-prune.desktop \
     "$STAGE/usr/share/applications/linux-disk-prune.desktop"
 install -Dm644 packaging/linux-disk-prune.svg \

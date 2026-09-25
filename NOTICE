@@ -1,0 +1,12 @@
+Disk Prune (linux_disk_prune)
+Copyright (c) 2026 saad-git-007
+
+Acknowledgement
+
+linux_disk_prune is inspired by disktree by Tobi Lütke
+(https://github.com/tobi/disktree, MIT License): the treemap design (colour by
+kind of data, hatched reclaimable space, a reserved selection colour), the
+mark -> review -> remove flow, and disk-usage measuring (st_blocks x 512,
+hard links counted once) follow its approach. No disktree source code is
+included; this is an independent implementation (egui/wgpu desktop app
+and ratatui terminal UI).

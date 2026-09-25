@@ -8,6 +8,8 @@ See where your space goes as a treemap or sunburst, then reclaim it with a recom
 
 <img src="docs/screenshots/sunburst-intro.gif" width="640" alt="Sunburst view animating in">
 
+**[⬇️ Download the .deb](https://github.com/saad-git-007/linux_disk_prune/releases/latest/download/linux-disk-prune_0.1.0_amd64.deb)** · [Install instructions](#install) · [Screenshots](#screenshots)
+
 *Inspired by [disktree](https://github.com/tobi/disktree) by Tobi Lütke ♥*
 
 </div>
@@ -118,14 +120,58 @@ cargo build --release && python3 tests/blackbox/run_blackbox_tests.py   # add --
 
 ## Install
 
-### .deb (Ubuntu 22.04, x86_64)
+### ⬇️ Download the .deb (Ubuntu 22.04 LTS or newer, x86_64)
+
+[![Download .deb](https://img.shields.io/badge/download-linux--disk--prune__0.1.0__amd64.deb-00f2de?style=for-the-badge&logo=ubuntu&logoColor=white)](https://github.com/saad-git-007/linux_disk_prune/releases/latest/download/linux-disk-prune_0.1.0_amd64.deb)
+
+**[linux-disk-prune_0.1.0_amd64.deb](https://github.com/saad-git-007/linux_disk_prune/releases/latest/download/linux-disk-prune_0.1.0_amd64.deb)** (about 5.4 MB) · [SHA-256](https://github.com/saad-git-007/linux_disk_prune/releases/latest/download/linux-disk-prune_0.1.0_amd64.deb.sha256) · [all releases](https://github.com/saad-git-007/linux_disk_prune/releases)
+
+Tested on Ubuntu 22.04. The binary only needs glibc ≥ 2.35, so it also installs on newer Ubuntu releases; the cleanup rules are written for 22.04.
+
+**Install in a terminal:**
+
+```sh
+# 1. Download the package and its checksum
+wget https://github.com/saad-git-007/linux_disk_prune/releases/latest/download/linux-disk-prune_0.1.0_amd64.deb
+wget https://github.com/saad-git-007/linux_disk_prune/releases/latest/download/linux-disk-prune_0.1.0_amd64.deb.sha256
+
+# 2. (Recommended) verify the download
+sha256sum -c linux-disk-prune_0.1.0_amd64.deb.sha256
+
+# 3. Install. apt pulls in any missing dependencies automatically
+sudo apt install ./linux-disk-prune_0.1.0_amd64.deb
+```
+
+Then open **Disk Prune** from the app launcher (Activities → search "Disk Prune"), or run `linux_disk_prune` in a terminal. Right-click the launcher icon for **Scan the whole disk**, or right-click a folder in Files → **Open With → Disk Prune**.
+
+**Install by double-clicking:** download the `.deb`, right-click it in Files → **Open With → Software Install** → **Install**.
+
+**Update:** download the newer `.deb` and run `sudo apt install ./linux-disk-prune_<version>_amd64.deb` again.
+
+**Uninstall:**
+
+```sh
+sudo apt remove linux-disk-prune
+```
+
+<details>
+<summary>What the package installs and depends on</summary>
+
+- `/usr/bin/linux_disk_prune` (and the alias `linux-disk-prune`)
+- `/usr/share/applications/linux-disk-prune.desktop` and its icon
+- docs in `/usr/share/doc/linux-disk-prune/`
+
+It **depends on** standard desktop libraries that every Ubuntu desktop already has: `libc6`, `libxkbcommon`, X11 libs, `libegl1`/`libgl1`. It **recommends** `libvulkan1` + `mesa-vulkan-drivers` (GPU rendering), `pkexec` (one password prompt for admin cleanups), `libglib2.0-bin` (`gio trash`) and `fonts-dejavu-core`.
+</details>
+
+### Build the .deb yourself
 
 ```sh
 ./packaging/build-deb.sh                   # needs cargo + dpkg-deb
 sudo apt install ./dist/linux-disk-prune_0.1.0_amd64.deb
 ```
 
-This adds **Disk Prune** to the app launcher (with a *Scan the whole disk* action and *Open with* for folders), plus `linux_disk_prune` / `linux-disk-prune` on your `PATH`.
+`cargo deb` works too (see `[package.metadata.deb]`).
 
 ### From source
 
@@ -193,4 +239,4 @@ packaging/             .deb build script, desktop entry, icon
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). See [NOTICE](NOTICE) for the disktree acknowledgement.

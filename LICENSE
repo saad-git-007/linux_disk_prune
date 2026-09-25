@@ -19,14 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
--------------------------------------------------------------------------------
-Acknowledgement
-
-linux_disk_prune is inspired by disktree by Tobi Lütke
-(https://github.com/tobi/disktree, MIT License): the treemap design (colour by
-kind of data, hatched reclaimable space, amber selection), the
-mark -> review -> remove flow, and disk-usage measuring (st_blocks x 512,
-hard links counted once) follow its approach. No disktree source code is
-included; this is an independent implementation (egui/wgpu desktop app
-and ratatui terminal UI).
