@@ -1135,7 +1135,9 @@ impl GuiApp {
         let modal = egui::Modal::new(Id::new("review"))
             .frame(Frame::new().fill(CARD).corner_radius(14).inner_margin(Margin::same(20)).stroke(Stroke::new(1.5, AMBER)))
             .show(ctx, |ui| {
-                ui.set_width(760.0_f32.min(ctx.content_rect().width() - 80.0));
+                let w = 760.0_f32.min(ctx.content_rect().width() - 80.0);
+                ui.set_width(w);
+                ui.set_max_width(w);
                 ui.heading(RichText::new("Review & clean").color(AMBER).strong());
                 ui.label(RichText::new("Nothing has been changed yet. Untick anything you want to keep.").color(DIM));
                 ui.add_space(8.0);
@@ -1152,14 +1154,14 @@ impl GuiApp {
                                 }
                                 ui.label(RichText::new("●").color(theme::risk(f.risk)));
                                 ui.label(RichText::new(format!("{:>10}", fmt_size(f.bytes))).monospace().strong());
-                                ui.label(&f.title);
                                 if f.needs_root && !self.engine.ctx.is_root {
                                     ui.label(RichText::new("admin").small().color(MODERATE));
                                 }
+                                ui.add(egui::Label::new(&f.title).truncate());
                             });
                             let cmd = f.command_text();
                             let short = if cmd.len() > 220 { format!("{}…", &cmd[..cmd.floor_char_boundary(220)]) } else { cmd };
-                            ui.label(RichText::new(format!("    $ {short}")).monospace().color(AMBER).size(12.0));
+                            ui.add(egui::Label::new(RichText::new(format!("    $ {short}")).monospace().color(AMBER).size(12.0)).wrap());
                         }
                         ui.add_space(8.0);
                     }
@@ -1172,7 +1174,7 @@ impl GuiApp {
                                     self.marked.remove(&i);
                                 }
                                 ui.label(RichText::new(format!("{:>10}", fmt_size(t.nodes[i].size))).monospace().strong());
-                                ui.label(tilde(&t.path_of(i), self.home()));
+                                ui.add(egui::Label::new(tilde(&t.path_of(i), self.home())).truncate());
                             });
                         }
                         ui.add_space(6.0);

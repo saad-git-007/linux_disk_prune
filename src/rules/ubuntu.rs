@@ -40,6 +40,7 @@ pub fn run_system_checks(ctx: &RuleContext) -> CheckOutput {
         check_crash,
         check_user_caches,
         check_docker,
+        super::extra::run_checks,
     ];
     let outputs: Vec<CheckOutput> = checks.par_iter().map(|c| c(ctx)).collect();
     let mut all = CheckOutput::default();
@@ -142,18 +143,27 @@ fn cache_dir_finding(
 
 /// 1. APT package archives.
 fn check_apt(_: &RuleContext) -> CheckOutput {
-    apt_findings(Path::new("/var/cache/apt"))
+    let s = crate::sysdirs::get();
+    apt_findings_at(&s.apt_cache, &s.apt_archives)
 }
 
 /// APT cache check against an injectable cache root (`/var/cache/apt`).
+#[cfg(test)]
 fn apt_findings(apt: &Path) -> CheckOutput {
-    let mut debs = list_files(&apt.join("archives"), |n| n.ends_with(".deb"));
-    debs.extend(list_files(&apt.join("archives/partial"), |_| true));
+    apt_findings_at(apt, &apt.join("archives"))
+}
+
+/// `apt` is Dir::Cache, `archives` is Dir::Cache::archives (from apt-config).
+fn apt_findings_at(apt: &Path, archives: &Path) -> CheckOutput {
+    let mut debs = list_files(archives, |n| n.ends_with(".deb"));
+    debs.extend(list_files(&archives.join("partial"), |_| true));
     let deb_count = debs.iter().filter(|f| f.0.extension().is_some_and(|e| e == "deb")).count();
     let bins = list_files(apt, |n| n.ends_with(".bin"));
     let (deb_bytes, bin_bytes): (u64, u64) =
         (debs.iter().map(|f| f.1).sum(), bins.iter().map(|f| f.1).sum());
-    if deb_bytes + bin_bytes == 0 {
+    // apt rebuilds pkgcache.bin/srcpkgcache.bin on its very next run (even
+    // `apt-get -s`), so they are not lasting savings: only .debs count.
+    if deb_bytes == 0 {
         return CheckOutput::default();
     }
     let mut what = Vec::new();
@@ -167,10 +177,10 @@ fn apt_findings(apt: &Path) -> CheckOutput {
         );
     }
     if bin_bytes > 0 {
-        what.push(format!("package-list caches, {}", fmt_size(bin_bytes)));
         detail.push(
-            "The package-list caches (pkgcache.bin, srcpkgcache.bin) are rebuilt on the \
-             next apt run.",
+            "apt-get clean also deletes the package-list caches (pkgcache.bin, \
+             srcpkgcache.bin), but apt rebuilds them on its next run, so they are not \
+             counted as savings.",
         );
     }
     CheckOutput::one(Finding {
@@ -178,7 +188,7 @@ fn apt_findings(apt: &Path) -> CheckOutput {
         category: "APT".into(),
         title: format!("APT cache ({})", what.join("; ")),
         risk: Risk::Safe,
-        bytes: deb_bytes + bin_bytes,
+        bytes: deb_bytes,
         detail: detail.join(" "),
         paths: debs.into_iter().chain(bins).map(|f| f.0).collect(),
         action: Action::Shell { command: "sudo apt-get clean".into() },
@@ -188,12 +198,13 @@ fn apt_findings(apt: &Path) -> CheckOutput {
 
 /// 2. Old, inactive kernels.
 fn check_kernels(_: &RuleContext) -> CheckOutput {
-    let status = fs::read_to_string("/var/lib/dpkg/status").unwrap_or_default();
+    let sys = crate::sysdirs::get();
+    let status = fs::read_to_string(&sys.dpkg_status).unwrap_or_default();
     let roots = KernelRoots {
-        boot: Path::new("/boot"),
-        modules: Path::new("/lib/modules"),
-        usr_src: Path::new("/usr/src"),
-        usr_lib: Path::new("/usr/lib"),
+        boot: &sys.boot,
+        modules: &sys.modules,
+        usr_src: &sys.usr_src,
+        usr_lib: &sys.usr_lib,
     };
     kernel_findings(&roots, &running_kernel(), &status, &apt_simulate_purge)
 }
@@ -208,7 +219,7 @@ struct KernelRoots<'a> {
 
 /// Output of `apt-get -s purge <pkgs>` (a simulation: no root, no changes),
 /// or None when apt-get cannot run or fails.
-fn apt_simulate_purge(pkgs: &[String]) -> Option<String> {
+pub(super) fn apt_simulate_purge(pkgs: &[String]) -> Option<String> {
     let o = Command::new("apt-get")
         .arg("-s")
         .arg("purge")
@@ -221,7 +232,7 @@ fn apt_simulate_purge(pkgs: &[String]) -> Option<String> {
 }
 
 /// Packages an `apt-get -s` run would remove (its `Remv` / `Purg` lines).
-fn apt_sim_removals(sim: &str) -> Vec<String> {
+pub(super) fn apt_sim_removals(sim: &str) -> Vec<String> {
     sim.lines()
         .filter_map(|l| l.strip_prefix("Remv ").or_else(|| l.strip_prefix("Purg ")))
         .filter_map(|rest| rest.split_whitespace().next())
@@ -432,17 +443,39 @@ fn kernel_findings(
     }
     if !leftovers.is_empty() {
         let paths: Vec<PathBuf> = leftovers.iter().map(|l| l.0.clone()).collect();
+        // Kernels removed without --purge leave dpkg records ("rc": config
+        // files) that still own these dirs: purge them first so dpkg's
+        // database stays consistent, then remove whatever is left.
+        let rc = rc_kernel_packages(dpkg_status, &paths);
+        let mut command = String::new();
+        if !rc.is_empty() {
+            command.push_str(&format!(
+                "sudo dpkg --purge {}; ",
+                rc.iter().map(|p| shq(p)).collect::<Vec<_>>().join(" ")
+            ));
+        }
+        command.push_str(&sudo_rm_rf(&paths));
         out.findings.push(Finding {
             id: "kernel-leftovers".into(),
             category: "Kernels".into(),
             title: format!("Leftover module dirs of {} removed kernels", paths.len()),
             risk: Risk::Moderate,
             bytes: leftovers.iter().map(|l| l.1).sum(),
-            detail: "Directories under /lib/modules whose kernel packages are already \
-                     removed; they hold files generated after install (DKMS modules, \
-                     modules.* indexes) that apt does not track."
-                .into(),
-            action: Action::Shell { command: sudo_rm_rf(&paths) },
+            detail: format!(
+                "Directories under /lib/modules whose kernel packages are already \
+                 removed; they hold files generated after install (DKMS modules, \
+                 modules.* indexes) that apt does not track.{}",
+                if rc.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " First purges the {} leftover dpkg records (removed, config kept) \
+                         of those kernels so the package database stays consistent.",
+                        rc.len()
+                    )
+                }
+            ),
+            action: Action::Shell { command },
             paths,
             needs_root: true,
         });
@@ -451,6 +484,33 @@ fn kernel_findings(
 }
 
 /// `sudo rm -rf -- <paths>` (all paths valid UTF-8, see `utf8_only`).
+/// Packages in dpkg "rc" state (removed, config files kept) belonging to the
+/// kernel versions of the given /lib/modules/<ver> dirs.
+fn rc_kernel_packages(dpkg_status: &str, module_dirs: &[PathBuf]) -> Vec<String> {
+    let versions: Vec<String> =
+        module_dirs.iter().filter_map(|p| p.file_name()?.to_str().map(str::to_string)).collect();
+    let mut out = Vec::new();
+    for stanza in dpkg_status.split("\n\n") {
+        let mut name = None;
+        let mut rc = false;
+        for l in stanza.lines() {
+            if let Some(n) = l.strip_prefix("Package: ") {
+                name = Some(n.trim());
+            } else if let Some(st) = l.strip_prefix("Status: ") {
+                rc = st.trim().ends_with("config-files");
+            }
+        }
+        if let (Some(n), true) = (name, rc) {
+            if n.starts_with("linux-") && versions.iter().any(|v| n.ends_with(&format!("-{v}"))) {
+                out.push(n.to_string());
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn sudo_rm_rf(paths: &[PathBuf]) -> String {
     let list: Vec<String> = paths.iter().map(|p| shq(&p.to_string_lossy())).collect();
     format!("sudo rm -rf -- {}", list.join(" "))
@@ -462,7 +522,7 @@ fn utf8_only(files: Vec<(PathBuf, u64)>) -> Vec<(PathBuf, u64)> {
 }
 
 /// 3. Disabled snap revisions.
-fn check_snaps(_: &RuleContext) -> CheckOutput {
+fn check_snaps(ctx: &RuleContext) -> CheckOutput {
     let list = Command::new("snap")
         .args(["list", "--all"])
         .env("LC_ALL", "C")
@@ -473,7 +533,13 @@ fn check_snaps(_: &RuleContext) -> CheckOutput {
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
     // No snapd (or it failed): we can't tell disabled from pending revisions.
     let Some(list) = list else { return CheckOutput::default() };
-    snap_findings(Path::new("/var/lib/snapd/snaps"), Path::new("/snap"), &list)
+    let home = &ctx.home;
+    snap_findings_ext(
+        &crate::sysdirs::get().snapd_state.join("snaps"),
+        &crate::sysdirs::get().snap_mount,
+        &list,
+        &[PathBuf::from("/var/snap"), home.join("snap")],
+    )
 }
 
 /// (name, revision) of rows marked `disabled` in `snap list --all` output.
@@ -506,7 +572,17 @@ fn disabled_snap_revisions(list: &str) -> Vec<(String, String)> {
 
 /// Snap check: revisions `snap list --all` reports as disabled, sized from
 /// their files in `snaps_dir`. `snap_root/<name>/current` is re-checked.
+#[cfg(test)]
 fn snap_findings(snaps_dir: &Path, snap_root: &Path, snap_list: &str) -> CheckOutput {
+    snap_findings_ext(snaps_dir, snap_root, snap_list, &[])
+}
+
+/// `data_roots` hold per-revision data (/var/snap/<name>/<rev>, ~/snap/<name>/<rev>)
+/// that `snap remove --revision` deletes along with the revision.
+fn snap_findings_ext(snaps_dir: &Path, snap_root: &Path, snap_list: &str, data_roots: &[PathBuf]) -> CheckOutput {
+    let mut immediate = 0u64;
+    let mut data = 0u64;
+    let mut data_dirs: Vec<String> = Vec::new();
     let mut cmds = Vec::new();
     let mut paths = Vec::new();
     let mut names: Vec<String> = Vec::new();
@@ -521,7 +597,21 @@ fn snap_findings(snaps_dir: &Path, snap_root: &Path, snap_list: &str) -> CheckOu
         if let Ok(md) = fs::symlink_metadata(&file) {
             if md.is_file() {
                 bytes += file_bytes(&md);
+                // A second link lives in snapd's download cache.
+                if md.nlink() <= 1 {
+                    immediate += file_bytes(&md);
+                }
                 paths.push(file);
+            }
+        }
+        for root in data_roots {
+            let dir = root.join(&name).join(&rev);
+            if fs::symlink_metadata(&dir).map_or(false, |m| m.is_dir()) {
+                let b = scanner::du(&dir).0;
+                data += b;
+                if b >= 1 << 20 {
+                    data_dirs.push(format!("{} ({})", dir.display(), fmt_size(b)));
+                }
             }
         }
         cmds.push(format!("sudo snap remove {} --revision={}", shq(&name), shq(&rev)));
@@ -537,13 +627,20 @@ fn snap_findings(snaps_dir: &Path, snap_root: &Path, snap_list: &str) -> CheckOu
         category: "Snap".into(),
         title: format!("Disabled snap revisions ({} in {})", cmds.len(), names.join(", ")),
         risk: Risk::Moderate,
-        bytes,
-        detail: "snapd keeps superseded revisions of every snap (refresh.retain, default 2-3) \
-                 so it can roll back. Removing disabled revisions loses that rollback point. \
-                 Each .snap file is also hard-linked into /var/lib/snapd/cache, so the space \
-                 comes back once snapd's periodic cache cleanup drops that link.\n\
-                 To keep fewer in future: sudo snap set system refresh.retain=2"
-            .into(),
+        bytes: bytes + data,
+        detail: format!(
+            "snapd keeps superseded revisions of every snap (refresh.retain, default 2-3) \
+             so it can roll back. Removing disabled revisions loses that rollback point and \
+             that revision's saved data{}.\n\
+             {} comes back immediately. The rest ({}) is also held by snapd's download \
+             cache (/var/lib/snapd/cache): after this cleanup those cached copies show up \
+             as \"Orphaned snapd download cache\" on the next analysis (visible when run \
+             with sudo).\n\
+             To keep fewer in future: sudo snap set system refresh.retain=2",
+            if data_dirs.is_empty() { String::new() } else { format!(": {}", data_dirs.join(", ")) },
+            fmt_size(immediate + data),
+            fmt_size(bytes - immediate),
+        ),
         paths,
         // Independent removals: one failing must not skip the others.
         action: Action::Shell { command: cmds.join("; ") },
@@ -553,10 +650,56 @@ fn snap_findings(snaps_dir: &Path, snap_root: &Path, snap_list: &str) -> CheckOu
 
 /// 4. Systemd journal above the retention target.
 fn check_journal(ctx: &RuleContext) -> CheckOutput {
-    journal_findings(Path::new("/var/log/journal"), ctx.journal_keep)
+    // journald writes to persistent storage when it exists, else to the
+    // volatile one; sysdirs lists persistent first.
+    let dirs = &crate::sysdirs::get().journals;
+    match dirs.len() {
+        0 => CheckOutput::default(),
+        _ => journal_findings(&dirs[0], ctx.journal_keep),
+    }
 }
 
 /// Journal check against an injectable journal directory.
+/// What `journalctl --vacuum-size=<keep>` frees: whole *archived* journal
+/// files (named `…@….journal[~]`), oldest first, until all journal files
+/// together use at most `keep`. Active files are never removed.
+/// None when there are no readable journal files.
+fn journal_vacuum_bytes(dir: &Path, keep: u64) -> Option<u64> {
+    let mut files: Vec<(bool, std::time::SystemTime, u64)> = Vec::new();
+    let mut dirs = vec![dir.to_path_buf()];
+    if let Ok(rd) = fs::read_dir(dir) {
+        dirs.extend(rd.flatten().filter(|e| e.file_type().map_or(false, |t| t.is_dir())).map(|e| e.path()));
+    }
+    for d in dirs {
+        let Ok(rd) = fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            if !(n.ends_with(".journal") || n.ends_with(".journal~")) {
+                continue;
+            }
+            let Ok(md) = e.metadata() else { continue };
+            if md.is_file() {
+                files.push((n.contains('@'), md.modified().unwrap_or(std::time::UNIX_EPOCH), file_bytes(&md)));
+            }
+        }
+    }
+    if files.is_empty() {
+        return None;
+    }
+    let mut total: u64 = files.iter().map(|f| f.2).sum();
+    let mut archived: Vec<&(bool, std::time::SystemTime, u64)> = files.iter().filter(|f| f.0).collect();
+    archived.sort_by_key(|f| f.1);
+    let mut freed = 0;
+    for f in archived {
+        if total <= keep {
+            break;
+        }
+        total -= f.2;
+        freed += f.2;
+    }
+    Some(freed)
+}
+
 fn journal_findings(dir: &Path, keep: u64) -> CheckOutput {
     if !dir.is_dir() {
         return CheckOutput::default();
@@ -565,13 +708,19 @@ fn journal_findings(dir: &Path, keep: u64) -> CheckOutput {
     if size <= keep {
         return CheckOutput::default();
     }
+    // Replay journald's vacuum when the files are readable; otherwise
+    // "size - keep" is a close lower bound.
+    let reclaim = journal_vacuum_bytes(dir, keep).unwrap_or(size - keep);
+    if reclaim == 0 {
+        return CheckOutput::default();
+    }
     let keep_mb = keep >> 20;
     CheckOutput::one(Finding {
         id: "journal".into(),
         category: "Logs".into(),
         title: format!("systemd journal is {} (keep {keep_mb} MiB)", fmt_size(size)),
         risk: Risk::Moderate,
-        bytes: size - keep,
+        bytes: reclaim,
         detail: format!(
             "Persistent journal logs in /var/log/journal. Vacuuming deletes the oldest \
              archived journal files until {keep_mb} MiB remain. To cap it permanently, set \
@@ -595,7 +744,7 @@ fn is_rotated_log(name: &str) -> bool {
 
 /// Old rotated logs (`syslog.1`, `kern.log.2.gz`, ...).
 fn check_rotated_logs(_: &RuleContext) -> CheckOutput {
-    rotated_log_findings(Path::new("/var/log"))
+    rotated_log_findings(&crate::sysdirs::get().log)
 }
 
 /// Regular files below `root` that are rotated logs. Skips `journal/` (own
@@ -650,7 +799,7 @@ fn rotated_log_findings(root: &Path) -> CheckOutput {
 
 /// 6b. Crash reports written by apport.
 fn check_crash(_: &RuleContext) -> CheckOutput {
-    crash_findings(Path::new("/var/crash"))
+    crash_findings(&crate::sysdirs::get().crash)
 }
 
 /// Crash-report check against an injectable directory (`/var/crash`).
@@ -678,13 +827,14 @@ fn crash_findings(dir: &Path) -> CheckOutput {
 
 /// 5 & 6a. Per-user caches: thumbnails, pip, cargo, npm, trash.
 fn check_user_caches(ctx: &RuleContext) -> CheckOutput {
-    let h = &ctx.home;
+    // Honour XDG_CACHE_HOME / XDG_DATA_HOME / CARGO_HOME / PIP_CACHE_DIR / npm_config_cache.
+    let d = super::extra::Dirs::resolve(ctx);
     let specs: Vec<(&str, &str, &str, Vec<PathBuf>, Risk, &str)> = vec![
         (
             "thumbnails",
             "User cache",
             "Thumbnail cache",
-            vec![h.join(".cache/thumbnails")],
+            vec![d.cache.join("thumbnails")],
             Risk::Safe,
             "Image previews generated by the file manager; regenerated when needed.",
         ),
@@ -692,7 +842,7 @@ fn check_user_caches(ctx: &RuleContext) -> CheckOutput {
             "pip-cache",
             "Python",
             "pip download cache",
-            vec![h.join(".cache/pip")],
+            vec![d.pip_cache(ctx.is_root)],
             Risk::Safe,
             "Wheels and HTTP responses cached by pip. Equivalent: pip cache purge",
         ),
@@ -700,7 +850,7 @@ fn check_user_caches(ctx: &RuleContext) -> CheckOutput {
             "cargo-registry",
             "Rust",
             "Cargo registry cache",
-            vec![h.join(".cargo/registry/cache"), h.join(".cargo/registry/src")],
+            vec![d.cargo.join("registry/cache"), d.cargo.join("registry/src")],
             Risk::Moderate,
             "Downloaded .crate archives and their extracted sources. Cargo re-downloads \
              what a build needs, so offline builds (--offline, vendored CI caches) break \
@@ -710,7 +860,7 @@ fn check_user_caches(ctx: &RuleContext) -> CheckOutput {
             "cargo-git",
             "Rust",
             "Cargo git checkouts",
-            vec![h.join(".cargo/git/checkouts")],
+            vec![d.cargo.join("git/checkouts")],
             Risk::Safe,
             "Checkouts of git dependencies; re-created from the git db on the next build.",
         ),
@@ -718,7 +868,7 @@ fn check_user_caches(ctx: &RuleContext) -> CheckOutput {
             "npm-cache",
             "Node",
             "npm cache",
-            vec![h.join(".npm/_cacache")],
+            vec![d.npm_cache(ctx.is_root).join("_cacache")],
             Risk::Safe,
             "npm's content-addressable package cache. Equivalent: npm cache clean --force",
         ),
@@ -726,7 +876,7 @@ fn check_user_caches(ctx: &RuleContext) -> CheckOutput {
             "trash",
             "User files",
             "Desktop Trash",
-            vec![h.join(".local/share/Trash/files"), h.join(".local/share/Trash/info")],
+            vec![d.data.join("Trash/files"), d.data.join("Trash/info")],
             Risk::Moderate,
             "Files you moved to the Trash. Emptying it is permanent — have a look first.",
         ),
@@ -1543,21 +1693,78 @@ broken row with too many columns here  1  disabled
     // ================================================================ journal
 
     #[test]
-    fn journal_reclaims_size_minus_keep_only_above_keep() {
-        let d = TempDir::new("journal");
-        d.file("journal/abc/system@1.journal", 3 << 20);
-        d.file("journal/abc/user-1000.journal", 1 << 20);
-        let dir = d.join("journal");
-        let size = scanner::du(&dir).0;
-        let out = journal_findings(&dir, 1 << 20);
+    fn leftover_kernels_purge_their_rc_dpkg_records_first() {
+        let status = "Package: linux-modules-6.8.0-52-generic\nStatus: deinstall ok config-files\n\n\
+                      Package: linux-image-6.8.0-52-generic\nStatus: deinstall ok config-files\n\n\
+                      Package: linux-modules-6.8.0-520-generic\nStatus: deinstall ok config-files\n\n\
+                      Package: linux-modules-6.8.0-138-generic\nStatus: install ok installed\n\n\
+                      Package: libfoo-6.8.0-52-generic\nStatus: deinstall ok config-files\n";
+        let dirs = [PathBuf::from("/lib/modules/6.8.0-52-generic")];
+        // Exact version suffix only; installed and non-kernel packages excluded.
+        assert_eq!(
+            rc_kernel_packages(status, &dirs),
+            vec!["linux-image-6.8.0-52-generic".to_string(), "linux-modules-6.8.0-52-generic".to_string()]
+        );
+        assert!(rc_kernel_packages(status, &[]).is_empty());
+    }
+
+    #[test]
+    fn snap_reports_immediate_space_and_revision_data() {
+        let d = TempDir::new("snap-imm");
+        for (n, r) in [("firefox", "4630"), ("code", "166"), ("core22", "1380")] {
+            fs::create_dir_all(d.join("snap").join(n)).unwrap();
+            std::os::unix::fs::symlink(r, d.join("snap").join(n).join("current")).unwrap();
+        }
+        let lone = d.file("snaps/firefox_4539.snap", 3 << 20);
+        let cached = d.file("snaps/code_165.snap", 2 << 20);
+        fs::hard_link(&cached, d.join("cache-copy")).unwrap();
+        d.file("snaps/core22_1122.snap", 1 << 20);
+        d.file("vardata/firefox/4539/prefs.db", 2 << 20);
+        let out = snap_findings_ext(&d.join("snaps"), &d.join("snap"), SNAP_LIST, &[d.join("vardata")]);
         let f = &out.findings[0];
-        assert_eq!(f.bytes, size - (1 << 20));
-        assert_eq!(shell_cmd(f), "sudo journalctl --vacuum-size=1M");
-        assert!(journal_findings(&dir, size).findings.is_empty(), "size == keep");
-        assert!(journal_findings(&dir, size + 1).findings.is_empty());
-        assert_eq!(journal_findings(&dir, size - 1).findings[0].bytes, 1);
+        let data = scanner::du(&d.join("vardata/firefox/4539")).0;
+        assert_eq!(f.bytes, alloc(&lone) + alloc(&cached) + alloc(&d.join("snaps/core22_1122.snap")) + data);
+        // The detail names the per-revision data that removal deletes, and
+        // separates what comes back now from what snapd's cache still holds.
+        assert!(f.detail.contains("vardata/firefox/4539"), "{}", f.detail);
+        assert!(f.detail.contains(&fmt_size(alloc(&cached))), "{}", f.detail);
+    }
+
+    #[test]
+    fn journal_vacuum_removes_whole_archived_files_oldest_first() {
+        let d = TempDir::new("journal");
+        let old = d.file("journal/abc/system@0001-old.journal", 3 << 20);
+        let newer = d.file("journal/abc/system@0002-new.journal", 2 << 20);
+        let active = d.file("journal/abc/system.journal", 1 << 20);
+        let t = |p: &Path, secs: u64| {
+            let f = fs::File::options().write(true).open(p).unwrap();
+            f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)).unwrap();
+        };
+        t(&old, 1_000);
+        t(&newer, 2_000);
+        t(&active, 3_000);
+        let dir = d.join("journal");
+        let (o, n) = (alloc(&old), alloc(&newer));
+        // keep 4 MiB of 6: only the oldest archived file has to go (whole file).
+        let f = &journal_findings(&dir, 4 << 20).findings[0];
+        assert_eq!(f.bytes, o);
+        assert_eq!(shell_cmd(f), "sudo journalctl --vacuum-size=4M");
+        // keep 1 MiB: both archived files go, the active one never does.
+        assert_eq!(journal_findings(&dir, 1 << 20).findings[0].bytes, o + n);
+        // Already under the keep size: nothing.
+        assert!(journal_findings(&dir, 64 << 20).findings.is_empty());
         assert!(journal_findings(&d.join("nope"), 0).findings.is_empty());
     }
+
+    #[test]
+    fn journal_falls_back_to_size_minus_keep_without_readable_files() {
+        let d = TempDir::new("journal-fallback");
+        d.file("journal/abc/unknown.bin", 3 << 20);
+        let dir = d.join("journal");
+        let size = scanner::du(&dir).0;
+        assert_eq!(journal_findings(&dir, 1 << 20).findings[0].bytes, size - (1 << 20));
+    }
+
 
     // ================================================================ rotated logs
 
@@ -1665,7 +1872,7 @@ broken row with too many columns here  1  disabled
     }
 
     #[test]
-    fn apt_counts_debs_partial_and_bin_caches() {
+    fn apt_counts_debs_and_partial_not_rebuilt_package_lists() {
         let d = TempDir::new("apt");
         let files = [
             d.file("apt/archives/a_1.0_amd64.deb", 2 << 20),
@@ -1677,7 +1884,9 @@ broken row with too many columns here  1  disabled
         d.file("apt/other.txt", 1 << 20);
         let out = apt_findings(&d.join("apt"));
         let f = &out.findings[0];
-        assert_eq!(f.bytes, files.iter().map(|p| alloc(p)).sum::<u64>());
+        // pkgcache.bin/srcpkgcache.bin come straight back on the next apt run:
+        // only the .deb archives and partial downloads are lasting savings.
+        assert_eq!(f.bytes, files[..2].iter().map(|p| alloc(p)).sum::<u64>());
         assert_eq!(shell_cmd(f), "sudo apt-get clean");
         assert!(f.title.contains("1 .deb"));
         // paths are exactly the counted files, and the text mentions both kinds.
@@ -1687,12 +1896,10 @@ broken row with too many columns here  1  disabled
         want.sort();
         assert_eq!(paths, want);
         assert!(f.detail.contains(".deb") && f.detail.contains("pkgcache.bin"));
-        // Only package-list caches: no claim about .deb archives.
+        // Only package-list caches: nothing lasting to reclaim, so no finding.
         let d2 = TempDir::new("apt-bins");
         d2.file("apt/pkgcache.bin", 2 << 20);
-        let f2 = &apt_findings(&d2.join("apt")).findings[0];
-        assert!(!f2.detail.contains(".deb") && !f2.title.contains(".deb"));
-        assert_eq!(f2.paths, [d2.join("apt/pkgcache.bin")]);
+        assert!(apt_findings(&d2.join("apt")).findings.is_empty());
         assert!(apt_findings(&d.join("none")).findings.is_empty());
     }
 

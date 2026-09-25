@@ -1714,8 +1714,8 @@ fn draw_side_panel(f: &mut Frame, app: &mut App, t: &Tree, area: Rect) {
     }
     f.render_widget(Paragraph::new(lines).block(panel("Selection", AMBER)), sel_area);
 
-    // Worth a look: the largest findings.
-    let block = panel("Worth a look", SAFE);
+    // Top savings: the largest findings.
+    let block = panel("Top savings", SAFE);
     let inner = block.inner(look_area);
     f.render_widget(block, look_area);
     let mut y = inner.y;

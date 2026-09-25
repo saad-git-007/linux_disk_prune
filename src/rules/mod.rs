@@ -1,5 +1,6 @@
 //! Recommendation engine: data model shared by all rule sets.
 
+pub mod extra;
 pub mod ubuntu;
 
 use crate::util::{shq, shq_path};

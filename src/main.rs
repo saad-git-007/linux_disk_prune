@@ -11,6 +11,7 @@ mod engine;
 mod gui;
 mod rules;
 mod scanner;
+mod sysdirs;
 mod ui;
 mod util;
 

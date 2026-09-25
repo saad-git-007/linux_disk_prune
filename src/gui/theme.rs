@@ -220,13 +220,14 @@ pub fn gradient_text(p: &Painter, pos: Pos2, text: &str, font: FontId, phase: f3
 /// Add system fonts as fallbacks so symbols missing from egui's bundled fonts
 /// (◆ ▦ ↑ → …) still render. DejaVu ships with every Ubuntu desktop.
 fn install_fonts(ctx: &egui::Context) {
-    const CANDIDATES: [&str; 2] = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
-    ];
+    // Ask fontconfig where the fonts are; stock Ubuntu paths as a fallback.
+    let candidates = crate::sysdirs::find_font(
+        &["DejaVu Sans", "Noto Sans Symbols2"],
+        &["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"],
+    );
     let mut fonts = egui::FontDefinitions::default();
     let mut added = false;
-    for (i, path) in CANDIDATES.iter().enumerate() {
+    for (i, path) in candidates.iter().enumerate() {
         if let Ok(bytes) = std::fs::read(path) {
             let name = format!("fallback{i}");
             fonts.font_data.insert(name.clone(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));

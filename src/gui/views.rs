@@ -318,9 +318,9 @@ impl GuiApp {
                 }
             });
 
-            // Worth a look
+            // Top savings: the largest suggestions
             card(ui, |ui| {
-                section(ui, "WORTH A LOOK", SAFE);
+                section(ui, "TOP SAVINGS", SAFE);
                 let mut top: Vec<(usize, &Finding)> = self.report.findings.iter().enumerate().collect();
                 top.sort_by(|a, b| b.1.bytes.cmp(&a.1.bytes));
                 if top.is_empty() {

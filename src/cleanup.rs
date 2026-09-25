@@ -34,7 +34,7 @@ fn check_removable(p: &Path, home: &Path) -> Result<(), String> {
 
 /// Mount points from `/proc/self/mountinfo` text (5th field, with the kernel's
 /// octal escapes such as `\040` for a space decoded).
-fn parse_mountinfo(text: &str) -> Vec<PathBuf> {
+pub(crate) fn parse_mountinfo(text: &str) -> Vec<PathBuf> {
     text.lines().filter_map(|l| l.split(' ').nth(4)).map(unescape_mount).collect()
 }
 

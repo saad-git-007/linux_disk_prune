@@ -10,7 +10,7 @@ use crate::engine::Notify;
 use crate::rules::{Action, Finding};
 use crate::util::{fmt_size, shq};
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 
@@ -49,14 +49,15 @@ impl Log {
 }
 
 pub fn pkexec_available() -> bool {
-    Path::new("/usr/bin/pkexec").exists()
+    crate::sysdirs::which("pkexec").is_some()
 }
 
 /// Run `sh -c script` (optionally via pkexec) streaming stdout and stderr.
 /// Lines starting with the markers below are classified for colouring.
 fn run_streaming(script: &str, as_root: bool, log: &Log) -> bool {
     let mut cmd = if as_root {
-        let mut c = Command::new("/usr/bin/pkexec");
+        let pkexec = crate::sysdirs::which("pkexec").unwrap_or_else(|| "pkexec".into());
+        let mut c = Command::new(pkexec);
         c.args(["/bin/sh", "-c", script]);
         c
     } else {
