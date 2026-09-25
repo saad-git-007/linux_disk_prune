@@ -1,0 +1,6 @@
+/target
+/dist
+/tests/blackbox/fx/
+/tests/blackbox/results.json
+/tests/blackbox/*.log
+__pycache__/

@@ -1,0 +1,18 @@
+[Desktop Entry]
+Type=Application
+Name=Disk Prune
+GenericName=Disk Usage Analyzer
+Comment=See what fills your disk as a treemap and safely reclaim space
+Exec=linux_disk_prune %f
+Icon=linux-disk-prune
+Terminal=false
+StartupWMClass=linux-disk-prune
+Categories=System;Filesystem;
+Keywords=disk;space;cleanup;treemap;du;storage;
+MimeType=inode/directory;
+Actions=WholeDisk;
+
+[Desktop Action WholeDisk]
+Name=Scan the whole disk
+Exec=linux_disk_prune /
+

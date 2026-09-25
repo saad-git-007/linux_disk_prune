@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <pattern id="h" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="2" height="6" fill="#ffffff" fill-opacity="0.35"/>
+    </pattern>
+  </defs>
+  <rect x="1" y="1" width="62" height="62" rx="10" fill="#12151f"/>
+  <rect x="5" y="5" width="31" height="54" rx="3" fill="#4682c8"/>
+  <rect x="8" y="8" width="25" height="13" rx="2" fill="#ffba30"/>
+  <rect x="39" y="5" width="20" height="24" rx="3" fill="#5fa55f"/>
+  <rect x="39" y="5" width="20" height="24" rx="3" fill="url(#h)"/>
+  <rect x="39" y="32" width="10" height="27" rx="3" fill="#9669be"/>
+  <rect x="52" y="32" width="7" height="13" rx="2" fill="#be5a96"/>
+  <rect x="52" y="48" width="7" height="11" rx="2" fill="#3c9696"/>
+</svg>
