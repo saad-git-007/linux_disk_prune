@@ -828,6 +828,9 @@ fn journal_findings(dir: &Path, keep: u64) -> CheckOutput {
     if reclaim == 0 {
         return CheckOutput::default();
     }
+    if crate::sysdirs::which("journalctl").is_none() {
+        return CheckOutput::default();
+    }
     let keep_mb = keep >> 20;
     // journalctl takes K/M/G: say exactly the keep size that was measured.
     let keep_arg = if keep % (1 << 20) == 0 { format!("{keep_mb}M") } else { format!("{}K", keep >> 10) };

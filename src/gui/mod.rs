@@ -990,8 +990,13 @@ impl GuiApp {
         lp.text(pos2(x + 20.0, y), Align2::LEFT_CENTER, "reclaimable", FontId::proportional(11.5), DIM);
         let x = x + 100.0;
         lp.rect_filled(egui::Rect::from_center_size(pos2(x + 5.0, y), vec2(10.0, 10.0)), 2.0, DANGER);
-        lp.text(pos2(x + 14.0, y), Align2::LEFT_CENTER, "marked", FontId::proportional(11.5), DIM);
-        lp.text(pos2(legend_rect.right() - 6.0, y), Align2::RIGHT_CENTER, format!("depth {}  ·  [ ]", self.map_depth), FontId::proportional(11.5), FAINT);
+        let end = lp.text(pos2(x + 14.0, y), Align2::LEFT_CENTER, "marked", FontId::proportional(11.5), DIM).right();
+        // The depth hint only where it fits after the legend.
+        let hint = format!("depth {}  ·  [ ]", self.map_depth);
+        let hw = lp.layout_no_wrap(hint.clone(), FontId::proportional(11.5), FAINT).size().x;
+        if legend_rect.right() - 6.0 - hw > end + 16.0 {
+            lp.text(pos2(legend_rect.right() - 6.0, y), Align2::RIGHT_CENTER, hint, FontId::proportional(11.5), FAINT);
+        }
     }
 
     fn sunburst_view(&mut self, ui: &mut egui::Ui) {
