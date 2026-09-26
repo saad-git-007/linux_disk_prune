@@ -41,7 +41,7 @@ Priority: optional
 Homepage: https://github.com/saad-git-007/linux_disk_prune
 Description: fast terminal disk analyzer and safe cleanup assistant for Ubuntu
  Scans a directory tree in parallel and shows where the space goes as a
- treemap and a size tree, then finds reclaimable space in known Ubuntu 22.04
+ treemap and a size tree, then finds reclaimable space in known Ubuntu
  bloat locations: APT cache, inactive kernels, disabled snap revisions, the
  systemd journal, rotated logs, crash dumps, developer caches (pip, cargo,
  npm, Docker) and project build output. Read-only until you confirm.

@@ -2139,7 +2139,7 @@ fn draw_about(f: &mut Frame, area: Rect) {
     let lines = vec![
         Line::raw(""),
         Line::from(title),
-        Line::from(Span::styled("  Fast disk analyzer & safe cleanup assistant for Ubuntu 22.04", st(DIM))),
+        Line::from(Span::styled("  Fast disk analyzer & safe cleanup assistant for Ubuntu", st(DIM))),
         Line::raw(""),
         Line::from(vec![
             Span::styled("  ♥ Inspired by ", st(CAUTION)),

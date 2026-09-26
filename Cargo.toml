@@ -3,7 +3,7 @@ name = "linux_disk_prune"
 version = "0.3.1"
 edition = "2021"
 rust-version = "1.95"
-description = "Fast disk analyzer and safe cleanup assistant for Ubuntu 22.04: GPU treemap desktop app + terminal UI (inspired by tobi/disktree)"
+description = "Fast disk analyzer and safe cleanup assistant for Ubuntu: GPU treemap desktop app + terminal UI (inspired by tobi/disktree)"
 authors = ["saad-git-007 <saadwaraich007@gmail.com>"]
 license = "MIT"
 readme = "README.md"
@@ -44,7 +44,7 @@ depends = "$auto, libxkbcommon0, libxkbcommon-x11-0, libegl1 | libgl1"
 recommends = "libvulkan1, mesa-vulkan-drivers, pkexec | policykit-1, libglib2.0-bin, fonts-dejavu-core"
 extended-description = """\
 Scans a directory tree in parallel and shows where the space goes as a \
-treemap and a size tree, then finds reclaimable space in known Ubuntu 22.04 \
+treemap and a size tree, then finds reclaimable space in known Ubuntu \
 bloat locations: APT cache, inactive kernels, disabled snap revisions, the \
 systemd journal, rotated logs, crash dumps, developer caches (pip, cargo, npm, \
 Docker) and project build output. Read-only until you confirm."""

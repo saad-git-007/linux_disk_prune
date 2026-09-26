@@ -3,7 +3,7 @@
 //!
 //! The treemap and the mark → review → remove flow follow disktree by Tobi
 //! Lütke (https://github.com/tobi/disktree); the Prune dashboard adds the
-//! Ubuntu 22.04 recommendation engine.
+//! Ubuntu recommendation engine.
 
 mod exec;
 mod large;
@@ -1371,7 +1371,7 @@ impl GuiApp {
                     ui.label(RichText::new("◆").size(30.0).color(AMBER));
                     ui.vertical(|ui| {
                         ui.label(RichText::new("Disk Prune").size(26.0).strong().color(grad(0.4)));
-                        ui.label(RichText::new(format!("linux_disk_prune {} · Ubuntu 22.04 disk analyzer & cleanup assistant", env!("CARGO_PKG_VERSION"))).color(DIM));
+                        ui.label(RichText::new(format!("linux_disk_prune {} · Ubuntu disk analyzer & cleanup assistant", env!("CARGO_PKG_VERSION"))).color(DIM));
                     });
                 });
                 ui.add_space(12.0);

@@ -1,5 +1,5 @@
 //! linux_disk_prune — fast terminal disk analyzer and safe cleanup assistant
-//! for Ubuntu 22.04 LTS.
+//! for Ubuntu.
 //!
 //! Inspired by disktree by Tobi Lütke (https://github.com/tobi/disktree): the
 //! parallel scanner and expandable size tree follow its design; the Ubuntu
@@ -29,7 +29,7 @@ pub const CREDITS: &str = "Inspired by disktree by Tobi Lütke — https://githu
 #[command(
     name = "linux_disk_prune",
     version,
-    about = "Fast disk analyzer and safe cleanup assistant for Ubuntu 22.04 (desktop GPU app + terminal UI)",
+    about = "Fast disk analyzer and safe cleanup assistant for Ubuntu (desktop GPU app + terminal UI)",
     long_about = "Scans a directory tree in parallel, visualises where the space goes, and \
                   finds reclaimable space in known Ubuntu bloat locations (APT cache, old \
                   kernels, snap revisions, journal, developer caches, build artifacts).\n\n\

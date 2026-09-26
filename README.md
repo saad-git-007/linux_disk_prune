@@ -2,7 +2,7 @@
 
 # ◆ Disk Prune
 
-**A fast, good-looking disk analyzer and *safe* cleanup assistant for Ubuntu 22.04 and newer (24.04, 26.04 LTS, 26.10), written in Rust.**
+**A fast, good-looking disk analyzer and *safe* cleanup assistant for Ubuntu, written in Rust.**
 
 See where your space goes as a treemap, sunburst or list of large items. Then reclaim it with a recommendation engine that knows Ubuntu: APT caches, old kernels, snap revisions, the journal, browser and Electron app caches, developer caches and build output. It shows exactly how much each item frees and the exact command it will run.
 
@@ -18,7 +18,7 @@ See where your space goes as a treemap, sunburst or list of large items. Then re
 
 ## Quick install
 
-On Ubuntu 22.04 or newer (x86_64):
+On Ubuntu (x86_64):
 
 ```sh
 wget https://github.com/saad-git-007/linux_disk_prune/releases/latest/download/linux-disk-prune_0.3.1_amd64.deb
@@ -164,7 +164,7 @@ Every rule asks the owning tool what is safe, instead of guessing from folder na
 - **Count only what is actually freed.** Sizes are real blocks on disk. Hard-linked data still used elsewhere (uv/pnpm/conda stores, snapd's cache) isn't counted. The journal figure replays journald's own vacuum.
 - **Never flagged:** Ollama/LLM models, browser profiles, Docker volumes, `/var/lib/apt/lists`, rustup toolchains, anything in hidden app folders apart from the caches above, `~/snap` app data.
 
-**Works on any Ubuntu machine, 22.04 or newer.** Nothing is tied to one user, release or layout:
+**Works on any Ubuntu machine.** Nothing is tied to one user, release or layout:
 - User paths follow `$HOME`, `XDG_CACHE_HOME` / `XDG_CONFIG_HOME` / `XDG_DATA_HOME`, `CARGO_HOME`, `PIP_CACHE_DIR`, `npm_config_cache`, `UV_CACHE_DIR`, `GOCACHE`, `GOMODCACHE` and `GOPATH`.
   - An override that could be much more than a cache is ignored: your home, one of its parents, a system directory, or a relative path.
   - Overrides are also ignored under `sudo` or with `--home`.
@@ -202,10 +202,10 @@ Sizes are real disk usage (`st_blocks × 512`, what `du` reports). Hard links ar
 | `cargo test` (111 tests) | Checks the measuring rules: sparse files, hard links, symlinks, unreadable dirs and small-file folding. Checks every rule's decisions against captured real-world inputs and fixtures: running apps, stale locks, missing tools, hard-linked stores, kernels still being installed, reverted snaps and implausible env overrides. Checks the removal guards: mounts, symlink races and ancestors of home. Checks shell safety: commands are generated for 16 hostile file names (`$(…)`, backticks, quotes, newlines, a leading `-`, globs, unicode), none of which gets injected | ✅ 111 / 111 |
 | [`tests/blackbox/`](tests/blackbox/run_blackbox_tests.py) | An independent black-box run of the CLI against GNU `du`. Covers sizes, detection with false-positive traps, command quoting via `shlex`, commands executed on fixtures, robustness and performance | ✅ 178 / 178 |
 | [`tests/safety/user/`](tests/safety/user/run_user_safety.py) | Every user-level cleanup **really executed** in a sandboxed home, against real programs: headless Chrome, Firefox, Electron 33, pip, uv, npm/npx, pnpm, cargo, go, `gio trash`, and tracker3 in Docker. Before and after it checks that the program still works, that cookies, localStorage, IndexedDB, bookmarks, venvs and projects survive, that **nothing outside the listed paths changed** (a sha256 manifest), and that the bytes reported match the bytes freed. It also runs traps: symlink escapes, hostile names, bind mounts | ✅ 328 / 328 |
-| [`tests/safety/audit/`](tests/safety/audit/run_audit_repros.py) | Reproducers from an adversarial safety audit, run in fixtures and disposable `ubuntu:22.04` containers. Cases include a kernel being installed during cleanup, MySQL binlogs in `/var/log`, a symlink swapped in after analysis, `apt autoremove` purging config, an app's bundled `node_modules`, `PIP_CACHE_DIR=$HOME`, a reverted snap and a Docker context mismatch | ✅ 14 / 14 fixed |
+| [`tests/safety/audit/`](tests/safety/audit/run_audit_repros.py) | Reproducers from an adversarial safety audit, run in fixtures and disposable Ubuntu containers. Cases include a kernel being installed during cleanup, MySQL binlogs in `/var/log`, a symlink swapped in after analysis, `apt autoremove` purging config, an app's bundled `node_modules`, `PIP_CACHE_DIR=$HOME`, a reverted snap and a Docker context mismatch | ✅ 14 / 14 fixed |
 | [`tests/functional/`](tests/functional/run_functional_tests.py) | CLI flags and exit codes, JSON schema, the scanner against `du` on hostile trees (100k files, 1,500-level nesting, FIFOs, sparse files, bind mounts), and the terminal UI driven through a pty: navigation, marking, cancel, real Trash/permanent deletion, guards, resizing and colour modes | ✅ 263 / 264 (one known limit: trees deeper than PATH_MAX, ~370 levels, are reported as unreadable) |
-| [`tests/compat/`](tests/compat/run_compat.sh) | Runs in fresh `ubuntu:22.04`, `24.04`, `26.04` and `26.10` containers. It installs the `.deb` with apt, creates real cleanup candidates, and runs every suggested system command exactly as shown: APT cache, orphaned packages, rotated logs, crash reports. It checks `dpkg --audit`, `apt-get check`, that only the listed packages went and live logs survived. It then starts the desktop app on Wayland (weston) and X11 (Xvfb) | ✅ all four releases |
-| [`tests/system/`](tests/system/validate_ubuntu_rules.py) | Read-only ground truth on a live Ubuntu 22.04 machine. For each rule it recomputes the answer independently (`apt-get -s`, `dpkg-query`, `snap list --all`, a replay of journald's vacuum, `find -links 1`, `du`, `pgrep`) and compares paths and bytes. It also lists large `~/.cache` folders that no rule covers | ✅ 39 / 39 rules exact |
+| [`tests/compat/`](tests/compat/run_compat.sh) | Runs in a fresh container of every current Ubuntu release (LTS and interim). It installs the `.deb` with apt, creates real cleanup candidates, and runs every suggested system command exactly as shown: APT cache, orphaned packages, rotated logs, crash reports. It checks `dpkg --audit`, `apt-get check`, that only the listed packages went and live logs survived. It then starts the desktop app on Wayland (weston) and X11 (Xvfb) | ✅ every release |
+| [`tests/system/`](tests/system/validate_ubuntu_rules.py) | Read-only ground truth on a live Ubuntu machine. For each rule it recomputes the answer independently (`apt-get -s`, `dpkg-query`, `snap list --all`, a replay of journald's vacuum, `find -links 1`, `du`, `pgrep`) and compares paths and bytes. It also lists large `~/.cache` folders that no rule covers | ✅ 39 / 39 rules exact |
 
 A full scan of a real 66 GB home folder matches `du -sx` **to the byte**. On an i7-1165G7 with NVMe it takes about **0.6 s** and **76 MB** of RAM. The whole root filesystem (about 1 M files) takes about 1–2 s.
 
@@ -221,22 +221,22 @@ python3 tests/system/validate_ubuntu_rules.py             # live system; needs `
 
 ## Install
 
-### ⬇️ Download the .deb (Ubuntu 22.04 LTS or newer, x86_64)
+### ⬇️ Download the .deb (Ubuntu, x86_64)
 
 [![Download .deb](https://img.shields.io/badge/download-linux--disk--prune__0.3.1__amd64.deb-00f2de?style=for-the-badge&logo=ubuntu&logoColor=white)](https://github.com/saad-git-007/linux_disk_prune/releases/latest/download/linux-disk-prune_0.3.1_amd64.deb)
 
 **[linux-disk-prune_0.3.1_amd64.deb](https://github.com/saad-git-007/linux_disk_prune/releases/latest/download/linux-disk-prune_0.3.1_amd64.deb)** (about 5.6 MB) · [SHA-256](https://github.com/saad-git-007/linux_disk_prune/releases/latest/download/linux-disk-prune_0.3.1_amd64.deb.sha256) · [all releases](https://github.com/saad-git-007/linux_disk_prune/releases)
 
-Tested on **Ubuntu 22.04, 24.04, 26.04 LTS and 26.10**. On each, the test suite:
+Tested on **every current Ubuntu release**, LTS and interim. On each, the test suite:
 - installs the `.deb` with apt
 - runs the suggested cleanups for real and checks the system is healthy afterwards
 - launches the desktop app on **Wayland** and on **X11**
 
 Newer releases differ in ways the app handles:
-- GNOME is Wayland-only from 25.10.
-- `rm` is the Rust uutils rewrite in 26.10.
-- apt is 3.x from 26.04.
-- Libraries were renamed with a `t64` suffix in 24.04.
+- GNOME is Wayland-only on recent releases.
+- `rm` is the Rust uutils rewrite on the newest ones.
+- apt is 3.x on newer releases.
+- Libraries were renamed with a `t64` suffix.
 
 The binary needs only glibc ≥ 2.35.
 
@@ -330,7 +330,7 @@ src/main.rs            CLI, summary/JSON report, picks GUI or TUI
 src/scanner.rs         parallel scanner → arena tree; exact OS names; hard-link dedupe; du()
 src/engine.rs          background scan and rule runs, reclaimable overlays (shared by both UIs)
 src/rules/mod.rs       Finding / Risk / Action model, report merging, shell-safe command text
-src/rules/ubuntu.rs    Ubuntu 22.04 system rules: APT, kernels, snap, journal, logs, Docker, user caches, projects
+src/rules/ubuntu.rs    Ubuntu system rules: APT, kernels, snap, journal, logs, Docker, user caches, projects
 src/rules/extra.rs     browser/Electron/IDE/tool caches, snapd orphans, autoremove, Flatpak, core dumps
 src/sysdirs.rs         runtime discovery of system paths (apt-config, snap, flatpak, journald, fontconfig)
 src/classify.rs        kind-of-data classification for colours
@@ -341,7 +341,7 @@ tests/blackbox/        independent black-box validation suite (Python stdlib)
 tests/system/          read-only ground-truth validator for a live Ubuntu machine
 tests/functional/      CLI / TUI (pty) / scanner functional suite
 tests/safety/          user-cache cleanups run against real apps; adversarial audit reproducers
-tests/compat/          install + real cleanups + Wayland/X11 launch on Ubuntu 22.04, 24.04, 26.04, 26.10
+tests/compat/          install + real cleanups + Wayland/X11 launch on each Ubuntu release
 packaging/             .deb build script, desktop entry, icon
 ```
 
