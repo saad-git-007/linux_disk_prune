@@ -29,7 +29,7 @@ Then open **Disk Prune** from the app launcher, or run `linux_disk_prune` in a t
 
 ## Highlights, and how it differs from disktree
 
-[disktree](https://github.com/tobi/disktree) is a lovely treemap for finding what fills a disk, built for Omarchy (Arch) with GPUI. Disk Prune started from its ideas and goes further: it **tells you what is safe to delete on Ubuntu, and deletes it for you, safely**.
+[disktree](https://github.com/tobi/disktree) is a lovely treemap for finding what fills a disk, built for Omarchy (Arch) with GPUI. Disk Prune started from its ideas and goes further: it **recommends what is safe to delete on Ubuntu, and deletes it upon your command**.
 
 **What Disk Prune adds**
 - 🧠 **An Ubuntu cleanup engine with 40+ rules.** Where disktree hatches folders by kind, Disk Prune asks the tool that owns the data:
